@@ -1,4 +1,4 @@
-# Builds and signs TimerRoot with only the Android SDK (no Gradle, no Maven).
+﻿# Builds and signs TimerRoot with only the Android SDK (no Gradle, no Maven).
 #
 #   git clone https://github.com/RikkaApps/Shizuku-API
 #   scripts/build.ps1 -Sdk "$env:LOCALAPPDATA\Android\Sdk" -ShizukuApi ..\Shizuku-API
@@ -9,15 +9,46 @@ param(
     [string]$ShizukuApi = "",
     [string]$Out = "",
     [int]$VersionCode = 31,
-    [string]$VersionName = "0.31"
+    [string]$VersionName = "0.31",
+    # 留空 = 自动选本机 SDK 里最高的 build-tools / platform
+    [string]$BuildTools = "",
+    [string]$Platform = ""
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $Out) { $Out = Join-Path $root 'build' }
-$bt = Join-Path $Sdk 'build-tools/36.0.0'
-$androidJar = Join-Path $Sdk 'platforms/android-36/android.jar'
-$framework = Join-Path $Sdk 'platforms/android-36/framework.aidl'
+if (-not (Test-Path $Sdk)) { throw "Android SDK not found at $Sdk (pass -Sdk)" }
+
+# build-tools：取版本号最大的那个（目录名形如 36.0.0 / 37.0.0）
+if (-not $BuildTools) {
+    $cand = Get-ChildItem (Join-Path $Sdk 'build-tools') -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'aapt2.exe') } |
+        Sort-Object { try { [version]$_.Name } catch { [version]'0.0' } }
+    if (-not $cand) { throw "no usable build-tools under $Sdk\build-tools" }
+    $BuildTools = $cand[-1].Name
+}
+$bt = Join-Path $Sdk "build-tools/$BuildTools"
+
+# platform：取有 android.jar + framework.aidl 的最高版本
+# （android-36 / android-37.2 这类名字，按数字排序）
+if (-not $Platform) {
+    $cand = Get-ChildItem (Join-Path $Sdk 'platforms') -Directory -ErrorAction SilentlyContinue |
+        Where-Object {
+            (Test-Path (Join-Path $_.FullName 'android.jar')) -and
+            (Test-Path (Join-Path $_.FullName 'framework.aidl'))
+        } |
+        Sort-Object { $n = $_.Name -replace '^android-', ''; try { [double]$n } catch { 0 } }
+    if (-not $cand) {
+        throw "no platform with android.jar + framework.aidl under $Sdk\platforms " +
+              "(install one, e.g. platforms;android-36)"
+    }
+    $Platform = $cand[-1].Name
+}
+$platformDir = Join-Path $Sdk "platforms/$Platform"
+$androidJar = Join-Path $platformDir 'android.jar'
+$framework = Join-Path $platformDir 'framework.aidl'
+Write-Host "using build-tools $BuildTools, platform $Platform"
 $aidlExe = Join-Path $bt 'aidl.exe'
 $d8 = Join-Path $bt 'd8.bat'
 $aapt2 = Join-Path $bt 'aapt2.exe'
@@ -32,7 +63,9 @@ if (-not (Test-Path $ShizukuApi)) {
     throw "Shizuku-API not found at $ShizukuApi (git clone https://github.com/RikkaApps/Shizuku-API)"
 }
 if (-not (Test-Path (Join-Path $root 'app/src/main/assets/timer'))) {
-    throw "app/src/main/assets/timer is missing; run scripts/fetch-timer.ps1 first"
+    throw ("app/src/main/assets/timer is missing. Either restore the committed one " +
+           "(git checkout -- app/src/main/assets/timer) or rebuild it from " +
+           "native/timer.c with native/build.sh")
 }
 
 $work = Join-Path $Out 'work'
@@ -86,7 +119,7 @@ Set-Content $remote -Value $text -NoNewline
 # AIDL
 foreach ($dir in @((Join-Path $work 'aidl'), (Join-Path $root 'app/src/main/aidl'))) {
     Get-ChildItem $dir -Recurse -Filter '*.aidl' | ForEach-Object {
-        & $aidlExe "-I$dir" "-I$(Join-Path $Sdk 'platforms/android-36')" "-p$framework" "-o$gen" $_.FullName
+        & $aidlExe "-I$dir" "-I$platformDir" "-p$framework" "-o$gen" $_.FullName
     }
 }
 
@@ -95,7 +128,7 @@ $sources = Get-ChildItem $src, $gen, (Join-Path $work 'stubs') -Recurse -Filter 
     ForEach-Object { $_.FullName -replace '\\', '/' }
 $argfile = Join-Path $work 'sources.txt'
 $sources | Set-Content $argfile -Encoding ascii
-& javac -source 11 -target 11 -nowarn -classpath $androidJar -d ($classes -replace '\\', '/') "@$argfile"
+& javac -encoding UTF-8 -source 11 -target 11 -nowarn -classpath $androidJar -d ($classes -replace '\\', '/') "@$argfile"
 if ($LASTEXITCODE -ne 0) { throw "javac failed" }
 
 # d8
@@ -121,7 +154,11 @@ Copy-Item $base $unsigned -Force
 & $jar uf $unsigned -C $dex classes.dex
 & $zipalign -f 4 $unsigned $aligned
 
-$keystore = Join-Path $work 'debug.keystore'
+# Keep the signing key outside build/ so every rebuild stays upgrade-compatible.
+$keystore = Join-Path (Split-Path $PSScriptRoot -Parent) 'keystore/debug.jks'
+if (-not (Test-Path (Split-Path $keystore -Parent))) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $keystore -Parent) | Out-Null
+}
 if (-not (Test-Path $keystore)) {
     & keytool -genkeypair -keystore $keystore -storepass android -keypass android `
         -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 `
