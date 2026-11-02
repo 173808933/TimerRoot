@@ -96,6 +96,20 @@ pwsh scripts/build.ps1 -Sdk "$env:LOCALAPPDATA\Android\Sdk" -ShizukuApi ..\Shizu
 NDK=/opt/android-ndk sh native/build.sh    # 覆盖 app/src/main/assets/timer
 ```
 
+设备端推导是 Kotlin（`app/src/main/kotlin/com/kpgc/timerroot/ota/`）。构建时
+`build.ps1` 会自动从 Gradle 缓存里找 `kotlin-compiler-embeddable`；找不到就打警告
+并跳过 —— APK 照样能出，只是「推导配置」会提示不可用（APK 也小 ~800 KB）。
+也可以显式指定：`-KotlinCompiler <jar>` / `-KotlinHome <kotlinc 目录>`；
+完全不想要它就用 `-NoKotlin`。
+
+Kotlin 那个包只依赖 `java.*`，没有 Android API，所以能在桌面 JVM 上直接跑 ——
+改完推导逻辑先对拍、再上机：
+
+```bash
+sh tools/derive-test.sh boot.img > /tmp/derived.conf
+# 注释行会不同，按 key = value 逐字段比对即可
+```
+
 ## 使用
 
 1. Shizuku 用**无线调试**启动（uid 2000 / `u:r:shell:s0`；root 启动是 `ksu` 域，权限不同）；
@@ -132,11 +146,17 @@ python cve98260_auto.py boot.img --out profiles/
 一个 APK 可以同时带多份 conf（按 `uname -r` 选）。推导脚本与踩坑清单见
 `cve98260-autoport/`（`PORTING.md`）。
 
-App 里还有「导入配置」：选一份 `.conf` 就写进 `/data/local/tmp/conf.d/`，
-下次「准备」优先于内置的 `assets/conf/`。所以加一台机器**不一定要重新打包** ——
-拿到 `python cve98260_auto.py boot.img --out profiles/` 生成的 conf，
-手机上导入即可；导入时会校验 `release` 是否等于本机 `uname -r`，并明确告诉你
-"与本机一致"还是"不匹配（本机是 …）"。
+App 里有两条路，都不需要重新打包：
+
+- **「推导配置」**（0.58 起）：直接选 `boot.img` 或裸 `Image`，在手机上跑完整推导
+  （`native` 里的 Kotlin 实现：carve boot v3/v4 → LZ4-legacy/gzip → kallsyms →
+  反汇编 call site → BTF），生成 conf 并自动导入。只有手机也能换机型。
+- **「导入配置」**：选一份现成的 `.conf`（比如 PC 侧
+  `python cve98260_auto.py boot.img --out profiles/` 生成的）。
+
+两者最终都写进 `/data/local/tmp/conf.d/`，下次「准备」优先于内置的 `assets/conf/`；
+都会校验 `release` 是否等于本机 `uname -r`，并明确告诉你「与本机一致」还是
+「不匹配（本机是 …）」。设备端推导的结果与 PC 版逐项对拍过（Neo7 / GT6 各 20 个字段全同）。
 
 必要条件：漏洞未修补（没有 `posixtimer_exec`）、shell 域能写 tracefs、
 4 KiB 页。KSU 路线额外要求内核允许加载模块（`CONFIG_MODULES=y`、

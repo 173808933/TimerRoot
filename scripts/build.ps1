@@ -12,7 +12,13 @@ param(
     [string]$VersionName = "0.31",
     # 留空 = 自动选本机 SDK 里最高的 build-tools / platform
     [string]$BuildTools = "",
-    [string]$Platform = ""
+    [string]$Platform = "",
+    # 设备端推导 boot.img 用的 Kotlin 编译器；留空 = 自动从 Gradle 缓存找。
+    # 找不到就跳过，APK 仍然能出，只是「推导配置」按钮会提示不可用。
+    [string]$KotlinCompiler = "",
+    [string]$KotlinHome = "",
+    # 不要设备端推导（APK 小 ~800 KB，但「推导配置」按钮会提示不可用）
+    [switch]$NoKotlin
 )
 
 $ErrorActionPreference = 'Stop'
@@ -123,6 +129,64 @@ foreach ($dir in @((Join-Path $work 'aidl'), (Join-Path $root 'app/src/main/aidl
     }
 }
 
+# ---- Kotlin（设备端 boot.img 推导），可选 -------------------------------------
+$ktSrc = Join-Path $root 'app/src/main/kotlin'
+$kclasses = Join-Path $work 'kclasses'
+$kotlinStdlib = ""
+if ((Test-Path $ktSrc) -and $NoKotlin) {
+    Write-Host "skipping Kotlin (-NoKotlin): APK will have no on-device derivation"
+} elseif (Test-Path $ktSrc) {
+    $m2 = Join-Path $env:USERPROFILE '.gradle\caches\modules-2\files-2.1'
+    # -Filter 只认 * 和 ?（不支持 [0-9]），所以先用 *.jar 取再按 -like 过滤
+    function Pick-Jar([string]$dir, [string]$pattern) {
+        if (-not (Test-Path $dir)) { return "" }
+        $f = Get-ChildItem $dir -Recurse -Filter '*.jar' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like $pattern } |
+            Sort-Object LastWriteTime | Select-Object -Last 1
+        if ($f) { return $f.FullName } else { return "" }
+    }
+
+    $kcJar = ""
+    if ($KotlinCompiler) {
+        $kcJar = $KotlinCompiler
+    } elseif ($KotlinHome) {
+        $kcJar = Join-Path $KotlinHome 'lib/kotlin-compiler.jar'
+    } else {
+        $kcRoot = Join-Path $m2 'org.jetbrains.kotlin\kotlin-compiler-embeddable'
+        if (Test-Path $kcRoot) {
+            $kver = (Get-ChildItem $kcRoot -Directory |
+                Sort-Object { try { [version]$_.Name } catch { [version]'0.0' } } |
+                Select-Object -Last 1).Name
+            $kcJar = Pick-Jar (Join-Path $kcRoot $kver) "kotlin-compiler-embeddable-*.jar"
+            $kotlinStdlib = Pick-Jar (Join-Path $m2 "org.jetbrains.kotlin\kotlin-stdlib\$kver") "kotlin-stdlib-*.jar"
+        }
+    }
+    if ($kcJar -and -not $kotlinStdlib) {
+        $kotlinStdlib = Pick-Jar (Join-Path $m2 'org.jetbrains.kotlin\kotlin-stdlib') 'kotlin-stdlib-*.jar'
+    }
+    # 去掉 -jdk / -sources 这类孪生 jar，避免匹配错
+    if ($kotlinStdlib -match '(sources|javadoc)') { $kotlinStdlib = "" }
+
+    if (-not $kcJar -or -not $kotlinStdlib) {
+        Write-Warning "Kotlin compiler/stdlib not found - building WITHOUT on-device derivation."
+        Write-Warning "  pass -KotlinCompiler <jar> or -KotlinHome <kotlinc dir> to enable it."
+    } else {
+        $coroutines = Pick-Jar (Join-Path $m2 'org.jetbrains.kotlinx\kotlinx-coroutines-core-jvm') 'kotlinx-coroutines-core-jvm-*.jar'
+        $trove = Pick-Jar (Join-Path $m2 'org.jetbrains.intellij.deps\trove4j') 'trove4j-*.jar'
+        $anno = Pick-Jar (Join-Path $m2 'org.jetbrains\annotations') 'annotations-[0-9]*.jar'
+        $javaExe = Join-Path (Split-Path (Get-Command javac).Source -Parent) 'java.exe'
+        $compilerCp = (@($kcJar, $kotlinStdlib, $coroutines, $trove, $anno) |
+            Where-Object { $_ }) -join ';'
+        $refCp = (@($kotlinStdlib, $anno) | Where-Object { $_ }) -join ';'
+        New-Item -ItemType Directory -Force -Path $kclasses | Out-Null
+        Write-Host "kotlinc: $([System.IO.Path]::GetFileName($kcJar))"
+        & $javaExe -cp $compilerCp org.jetbrains.kotlin.cli.jvm.K2JVMCompiler `
+            -no-stdlib -no-reflect -classpath $refCp -d ($kclasses -replace '\\', '/') `
+            ($ktSrc -replace '\\', '/')
+        if ($LASTEXITCODE -ne 0) { throw "kotlinc failed" }
+    }
+}
+
 # javac
 $sources = Get-ChildItem $src, $gen, (Join-Path $work 'stubs') -Recurse -Filter '*.java' |
     ForEach-Object { $_.FullName -replace '\\', '/' }
@@ -132,10 +196,17 @@ $sources | Set-Content $argfile -Encoding ascii
 if ($LASTEXITCODE -ne 0) { throw "javac failed" }
 
 # d8
-$classFiles = Get-ChildItem $classes -Recurse -Filter '*.class' | ForEach-Object { $_.FullName -replace '\\', '/' }
+$classFiles = @(Get-ChildItem $classes -Recurse -Filter '*.class')
+if (Test-Path $kclasses) {
+    $classFiles += @(Get-ChildItem $kclasses -Recurse -Filter '*.class')
+}
+$classFiles = $classFiles | ForEach-Object { $_.FullName -replace '\\', '/' }
 $classArg = Join-Path $work 'classes.txt'
 $classFiles | Set-Content $classArg -Encoding ascii
-& $d8 --lib $androidJar --min-api 30 --output ($dex -replace '\\', '/') "@$classArg"
+$d8Inputs = @("--lib", $androidJar, "--min-api", "30",
+    "--output", ($dex -replace '\\', '/'), "@$classArg")
+if ($kotlinStdlib) { $d8Inputs += $kotlinStdlib }   # 运行期要 stdlib，直接打进 dex
+& $d8 @d8Inputs
 if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
 
 # resources + manifest

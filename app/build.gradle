@@ -10,8 +10,8 @@ android {
         applicationId 'com.kpgc.timerroot'
         minSdk 30
         targetSdk 36
-        versionCode 58
-        versionName '0.57-multi'
+        versionCode 59
+        versionName '0.58-multi'
     }
 
     buildTypes {

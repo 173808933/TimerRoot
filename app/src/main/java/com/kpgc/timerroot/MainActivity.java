@@ -31,6 +31,10 @@ import android.widget.Toast;
 import android.widget.TextView;
 
 import java.io.File;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
+import java.io.InputStream;
+import java.io.FileOutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -229,6 +233,7 @@ public class MainActivity extends Activity {
         tools3.setOrientation(LinearLayout.HORIZONTAL);
         tools3.addView(pill("上次日志", TEXT, CARD, v -> showLastRun()), rowParams());
         tools3.addView(pill("导入配置", TEXT, CARD, v -> pickConf()), rowParams());
+        tools3.addView(pill("推导配置", TEXT, CARD, v -> pickImage()), rowParams());
         body.addView(tools3);
 
         body.addView(bigButton("获取 root Shell", GREEN, 0xFF04140A, v -> confirmRoot()));
@@ -558,6 +563,79 @@ public class MainActivity extends Activity {
      * 选一份 conf 导入。conf 由 PC 侧的 cve98260_auto.py 从 boot.img 生成，
      * 或者手工写；导入后下次「准备」按 release 匹配自动取用，不用重新打包 APK。
      */
+    private static final int REQ_IMG = 0x0C10;
+
+    /**
+     * 选一份 boot.img，在设备上直接推导 conf（不用 PC）。
+     *
+     * 解析跑在 [com.kpgc.timerroot.ota.Deriver] 里（Kotlin，反射调用）：
+     * carve → kallsyms → 反汇编 call site → BTF。推导结果和 PC 版
+     * cve98260_auto.py 的 20 个字段逐项一致（Neo7 / GT6 都对拍过）。
+     */
+    private void pickImage() {
+        if (service == null) {
+            toast("请先绑定服务");
+            return;
+        }
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            startActivityForResult(i, REQ_IMG);
+        } catch (Throwable t) {
+            addLog("打不开文件选择器：" + t);
+        }
+    }
+
+    private void deriveFromImage(Uri uri, String fileName) {
+        new Thread(() -> {
+            File tmp = new File(getCacheDir(), "boot.img");
+            try {
+                addLog("正在读取 " + fileName + " …");
+                long total = 0;
+                try (InputStream in = getContentResolver().openInputStream(uri);
+                     FileOutputStream out = new FileOutputStream(tmp)) {
+                    if (in == null) {
+                        addLog("推导失败：读不到文件");
+                        return;
+                    }
+                    byte[] buf = new byte[1 << 20];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                        total += n;
+                        if (total > 512L * 1024 * 1024) {
+                            addLog("推导失败：文件超过 512 MB，不像是 boot.img");
+                            return;
+                        }
+                    }
+                }
+                addLog("镜像已就位（" + total + " 字节），开始解析，可能要几十秒…");
+                Class<?> c = Class.forName("com.kpgc.timerroot.ota.Deriver");
+                Object r = c.getMethod("derive", String.class).invoke(null, tmp.getAbsolutePath());
+                String text = String.valueOf(r);
+                if (text.startsWith("ERR:")) {
+                    addLog("推导失败：" + text.substring(4).trim());
+                    return;
+                }
+                Matcher m = Pattern.compile("(?m)^\\s*release\\s*=\\s*\"([^\"]+)\"")
+                        .matcher(text);
+                String rel = m.find() ? m.group(1) : "derived";
+                String res = service.importConf(rel + ".conf", text);
+                addLog("推导完成（release=" + rel + "）\n" + res);
+                ui.post(() -> toast("已生成并导入：" + rel));
+            } catch (ClassNotFoundException e) {
+                addLog("此构建没有内置推导（编译时未找到 kotlinc）；"
+                        + "请用 PC 的 cve98260_auto.py 生成后再点「导入配置」");
+            } catch (Throwable t) {
+                addLog("推导失败：" + t);
+            } finally {
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+            }
+        }).start();
+    }
+
     private void pickConf() {
         if (service == null) {
             toast("请先绑定服务");
@@ -576,7 +654,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request != REQ_CONF || result != RESULT_OK || data == null || data.getData() == null) {
+        if ((request != REQ_CONF && request != REQ_IMG) || result != RESULT_OK
+                || data == null || data.getData() == null) {
             return;
         }
         final Uri uri = data.getData();
@@ -595,6 +674,10 @@ public class MainActivity extends Activity {
             // 名字拿不到就退回默认名，conf 里的 release 才是关键
         }
         final String fileName = name;
+        if (request == REQ_IMG) {
+            deriveFromImage(uri, fileName);
+            return;
+        }
         new Thread(() -> {
             try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
                 if (in == null) {
