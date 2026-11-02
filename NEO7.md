@@ -76,6 +76,10 @@ pwsh scripts/build.ps1 -Sdk "$env:LOCALAPPDATA\Android\Sdk" -ShizukuApi ..\Shizu
 `keystore/debug.jks`，缺失时自动 `keytool` 生成 —— 所以同一个工作区反复构建
 始终可以覆盖安装。
 
+> 密钥不进仓库（`*.jks` 被忽略）。**全新克隆会生成一把新密钥**，签出来的 APK
+> 无法覆盖安装旧的那份（`INSTALL_FAILED_UPDATE_INCOMPATIBLE`）。
+> 想升级安装就把原来的 `keystore/debug.jks` 一起带过来，或者先卸载旧版。
+
 重新编 native（改了 `native/timer.c` 才需要）：
 
 ```bash
