@@ -985,7 +985,13 @@ public class MainActivity extends Activity {
                 .daemon(false)
                 .processNameSuffix("timer")
                 .debuggable(false)
-                .version(7);
+                /*
+                 * 每次改 IUserService 都要 +1：Shizuku 只按这个数字判断能不能复用
+                 * 已经跑着的用户服务进程，数字不变就会拿到旧进程的 binder，
+                 * 新加的 AIDL 方法在旧进程里不存在（表现为 unknown transaction）。
+                 * 7 -> 8：importConf
+                 */
+                .version(8);
     }
 
     /** 当前 UI 上的全部日志（导出和复制都用它）。 */
