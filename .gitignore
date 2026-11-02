@@ -7,8 +7,10 @@ local.properties
 *.keystore
 *.jks
 
-# the exploit binary is fetched, not committed
-app/src/main/assets/timer
+# upstream fetches the exploit binary at build time; this fork commits the
+# Neo7 build so a fresh clone can produce an APK without an NDK.
+# To go back to upstream behaviour, restore the ignore line below.
+# app/src/main/assets/timer
 
 # ide
 .idea/

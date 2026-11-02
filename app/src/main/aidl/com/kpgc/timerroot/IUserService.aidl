@@ -12,4 +12,7 @@ interface IUserService {
     String closeRoot() = 8;
     String info() = 9;
     String rebootDevice() = 10;
+    String exportLog(String uiText) = 11;
+    String rootdExec(String cmd) = 12;
+    String suCheck() = 13;
 }

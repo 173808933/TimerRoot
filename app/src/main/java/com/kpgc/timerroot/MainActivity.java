@@ -19,12 +19,14 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Toast;
 import android.widget.TextView;
 
+import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -84,7 +86,7 @@ public class MainActivity extends Activity {
         public void onServiceConnected(ComponentName name, IBinder binder) {
             service = IUserService.Stub.asInterface(binder);
             bound = true;
-            addLog("user service connected");
+            addLog("用户服务已连接");
             refreshDetails();
         }
 
@@ -92,7 +94,7 @@ public class MainActivity extends Activity {
         public void onServiceDisconnected(ComponentName name) {
             service = null;
             bound = false;
-            addLog("user service disconnected");
+            addLog("用户服务已断开");
             refreshDetails();
         }
     };
@@ -128,7 +130,7 @@ public class MainActivity extends Activity {
         setContentView(root);
         showTab(0);
         refreshDetails();
-        addLog("TimerRoot ready");
+        addLog("TimerRoot 已就绪");
         if (safePing() && safePermission() == 0) {
             bindService();
         }
@@ -153,13 +155,13 @@ public class MainActivity extends Activity {
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = new TextView(this);
-        title.setText("TimerRoot");
+        title.setText("TimerRoot Neo7");
         title.setTextColor(TEXT);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         header.addView(title, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        header.addView(pill("Reboot", RED, CARD, v -> reboot()));
+        header.addView(pill("重启", RED, CARD, v -> reboot()));
         body.addView(header);
         body.addView(spacer(12));
 
@@ -171,12 +173,12 @@ public class MainActivity extends Activity {
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
         statusTitle = new TextView(this);
-        statusTitle.setText("Not connected");
+        statusTitle.setText("未连接");
         statusTitle.setTextColor(TEXT);
         statusTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
         statusTitle.setTypeface(Typeface.DEFAULT_BOLD);
         statusSubtitle = new TextView(this);
-        statusSubtitle.setText("Start Shizuku first");
+        statusSubtitle.setText("请先启动 Shizuku");
         statusSubtitle.setTextColor(0xFFBFD8C6);
         statusSubtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         texts.addView(statusTitle);
@@ -196,8 +198,8 @@ public class MainActivity extends Activity {
         LinearLayout details = new LinearLayout(this);
         details.setOrientation(LinearLayout.VERTICAL);
         details.setBackground(cardBackground(CARD));
-        detailModel = addRow(details, "Device", "-", true);
-        detailKernel = addRow(details, "Kernel", "-", true);
+        detailModel = addRow(details, "机型", "-", true);
+        detailKernel = addRow(details, "内核", "-", true);
         detailKsud = addRow(details, "ksud", "-", true);
         detailKsu = addRow(details, "KernelSU", "-", true);
         detailSelinux = addRow(details, "SELinux", "-", true);
@@ -208,20 +210,31 @@ public class MainActivity extends Activity {
         LinearLayout tools = new LinearLayout(this);
         tools.setOrientation(LinearLayout.HORIZONTAL);
         tools.addView(pill("Shizuku", TEXT, CARD, v -> showShizuku()), rowParams());
-        tools.addView(pill("Prepare", TEXT, CARD, v -> prepare()), rowParams());
-        tools.addView(pill("Diagnose", TEXT, CARD, v -> run("ids", "ids")), rowParams());
-        tools.addView(pill("Log", TEXT, CARD, v -> showTab(1)), rowParams());
+        tools.addView(pill("准备", TEXT, CARD, v -> prepare()), rowParams());
+        tools.addView(pill("诊断", TEXT, CARD, v -> run("ids", "ids")), rowParams());
+        tools.addView(pill("日志", TEXT, CARD, v -> showTab(1)), rowParams());
         body.addView(tools);
 
-        body.addView(bigButton("Get root shell", GREEN, 0xFF04140A, v -> confirmRoot()));
+        LinearLayout tools2 = new LinearLayout(this);
+        tools2.setOrientation(LinearLayout.HORIZONTAL);
+        tools2.addView(pill("自检", TEXT, CARD, v -> selfCheck()), rowParams());
+        tools2.addView(pill("root 命令", TEXT, CARD, v -> rootdPrompt()), rowParams());
+        body.addView(tools2);
+
+        LinearLayout tools3 = new LinearLayout(this);
+        tools3.setOrientation(LinearLayout.HORIZONTAL);
+        tools3.addView(pill("上次日志", TEXT, CARD, v -> showLastRun()), rowParams());
+        body.addView(tools3);
+
+        body.addView(bigButton("获取 root Shell", GREEN, 0xFF04140A, v -> confirmRoot()));
         body.addView(spacer(8));
-        body.addView(bigButton("Load KernelSU", 0xFF1F7A3D, 0xFFE8FFF0, v -> confirmKsu()));
+        body.addView(bigButton("加载 KernelSU", 0xFF1F7A3D, 0xFFE8FFF0, v -> confirmKsu()));
         body.addView(spacer(8));
-        body.addView(bigButton("Stop", CARD, RED, v -> stopRoot()));
+        body.addView(bigButton("停止", CARD, RED, v -> stopRoot()));
 
         body.addView(spacer(18));
-        body.addView(smallHint("First run: allow Shizuku, then press Prepare. "
-                + "The exploit needs the shell user, which is why it runs through Shizuku."));
+        body.addView(smallHint("第一次使用：先授权 Shizuku，再点「准备」。准备会把 Neo7 的漏洞程序和与 uname -r 匹配的配置写入设备。"
+                + "「诊断」只跑事件 id 发现，不触发漏洞；日志里要能看到 burst hit=1 才算真正命中。"));
         body.addView(spacer(8));
 
 
@@ -239,16 +252,17 @@ public class MainActivity extends Activity {
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = new TextView(this);
-        title.setText("Log");
+        title.setText("日志");
         title.setTextColor(TEXT);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         header.addView(title, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        header.addView(pill("Copy", TEXT, CARD, v -> copyLog()));
-        header.addView(pill("Clear", TEXT, CARD, v -> {
+        header.addView(pill("导出", TEXT, CARD, v -> exportLog()));
+        header.addView(pill("复制", TEXT, CARD, v -> copyLog()));
+        header.addView(pill("清空", TEXT, CARD, v -> {
             logText.setText("");
-            addLog("log cleared");
+            addLog("日志已清空");
         }));
         page.addView(header);
         page.addView(spacer(12));
@@ -421,6 +435,8 @@ public class MainActivity extends Activity {
         applyDetails();
     }
 
+    private String serviceBuild = "";
+
     private void parseInfo(String raw) {
         for (String line : raw.split("\n")) {
             int eq = line.indexOf('=');
@@ -437,6 +453,9 @@ public class MainActivity extends Activity {
                 ksud = value;
             } else if (key.equals("ksu")) {
                 ksu = value;
+            } else if (key.equals("build") && !value.equals(serviceBuild)) {
+                serviceBuild = value;
+                addLog("用户服务版本：" + value);
             }
         }
     }
@@ -452,28 +471,29 @@ public class MainActivity extends Activity {
             statusCard.setBackground(cardBackground(
                     rootOpen || "active".equals(ksu) ? GREEN_DARK : CARD));
         }
-        detailKsud.setText(ksud);
-        detailKsu.setText("active".equals(ksu) ? "jailbreak mode (u:r:ksu:s0)" : ksu);
+        detailKsud.setText("not loaded".equals(ksud) ? "未加载"
+                : ("missing".equals(ksud) ? "缺失" : ksud));
+        detailKsu.setText("active".equals(ksu) ? "越狱模式（u:r:ksu:s0）" : "未启用");
         detailSelinux.setText(selinux);
         detailSeccomp.setText(seccomp);
         boolean shizuku = safePing();
         if ("active".equals(ksu)) {
-            statusTitle.setText("Jailbreak mode");
-            statusSubtitle.setText("KernelSU loaded · su in u:r:ksu:s0 · gone after reboot");
+            statusTitle.setText("越狱模式");
+            statusSubtitle.setText("KernelSU 已加载 · su 为 u:r:ksu:s0 · 重启后失效");
             statusBadge.setText("✓");
             statusBadge.setTextColor(GREEN);
         } else if (rootOpen) {
-            statusTitle.setText("Root shell");
-            statusSubtitle.setText("uid=0 · u:r:shell:s0 · gone after reboot");
+            statusTitle.setText("Root Shell");
+            statusSubtitle.setText("uid=0 · u:r:shell:s0 · 重启后失效");
             statusBadge.setText("✓");
             statusBadge.setTextColor(GREEN);
         } else if (shizuku && bound) {
-            statusTitle.setText("Ready");
-            statusSubtitle.setText("Shizuku connected · no root yet");
+            statusTitle.setText("就绪");
+            statusSubtitle.setText("Shizuku 已连接 · 尚未提权");
             statusBadge.setText("•");
             statusBadge.setTextColor(MUTED);
         } else {
-            statusTitle.setText("Not connected");
+            statusTitle.setText("未连接");
             statusSubtitle.setText(shizuku
                     ? (safePermission() == 0
                         ? "Shizuku is running · connecting..."
@@ -506,9 +526,9 @@ public class MainActivity extends Activity {
         if (safePing() && safePermission() != 0) {
             try {
                 Shizuku.requestPermission(REQUEST_CODE);
-                addLog("permission requested");
+                addLog("已请求权限");
             } catch (Throwable t) {
-                addLog("request failed: " + t);
+                addLog("请求权限失败：" + t);
             }
         } else if (safePing() && !bound) {
             bindService();
@@ -523,24 +543,109 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * 在已打开的 root shell 里跑一组只读检查：caps、SELinux 域、/data 访问、
+     * su / ksud 是否存在。用来判断这份 uid=0 到底能干什么，以及 KSU 链路的前置条件。
+     */
+    /**
+     * 读上一次运行的原生日志。走 App 私有外部目录，不需要 Shizuku、不需要权限，
+     * 所以重启后第一件事就能看上一轮到底死在哪一行。
+     */
+    private void showLastRun() {
+        File f = new File(getExternalFilesDir(null), "last-run.log");
+        if (!f.isFile() || f.length() == 0) {
+            addLog("没有上一次的日志（" + f.getAbsolutePath() + "）");
+            return;
+        }
+        try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+            int len = (int) Math.min(f.length(), 256 * 1024);
+            byte[] b = new byte[len];
+            int n = 0;
+            while (n < len) {
+                int r = in.read(b, n, len - n);
+                if (r <= 0) {
+                    break;
+                }
+                n += r;
+            }
+            addLog("===== 上次运行（" + f.length() + " 字节）=====");
+            addLog(new String(b, 0, n, "UTF-8").trim());
+        } catch (Throwable t) {
+            addLog("读取上次日志失败：" + t);
+        }
+    }
+
+    /** rootd 命令输入框：只对 fake 路线成功后的开机有效。 */
+    private void rootdPrompt() {
+        if (service == null) {
+            toast("请先绑定服务");
+            return;
+        }
+        final EditText input = new EditText(this);
+        input.setText("id");
+        input.setTextSize(14);
+        new AlertDialog.Builder(this)
+                .setTitle("通过 rootd 执行")
+                .setMessage("只在「加载 KernelSU」成功那次开机内有效；重启后失效。")
+                .setView(input)
+                .setPositiveButton("执行", (d, w) -> runRootd(input.getText().toString()))
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void runRootd(String cmd) {
+        if (cmd == null || cmd.trim().isEmpty()) {
+            return;
+        }
+        new Thread(() -> {
+            try {
+                String out = service.rootdExec(cmd.trim());
+                addLog("$ " + cmd.trim() + "\n" + (out == null ? "" : out.trim()));
+            } catch (Throwable t) {
+                addLog("rootd 失败：" + t);
+            }
+        }).start();
+    }
+
+    private void selfCheck() {
+        if (service == null) {
+            toast("请先绑定服务");
+            return;
+        }
+        new Thread(() -> {
+            try {
+                String out = service.execRoot(
+                        "id;"
+                        + " grep -E '^(Uid|Gid|Cap)' /proc/self/status;"
+                        + " cat /proc/self/attr/current;"
+                        + " echo '-- /data --'; ls -ld /data/data /data/adb 2>&1;"
+                        + " echo '-- su --'; ls -l /system/bin/su /data/adb/ksu/bin/ksud 2>&1");
+                addLog("自检结果：\n" + out.trim());
+                ui.post(() -> toast("自检完成，见日志"));
+            } catch (Throwable t) {
+                addLog("自检失败：" + t);
+            }
+        }).start();
+    }
+
     private void prepare() {
         if (!safePing()) {
             new AlertDialog.Builder(this)
-                    .setTitle("Shizuku is not running")
-                    .setMessage("Start Shizuku first:\n\n"
-                            + "1. open the Shizuku app\n"
-                            + "2. use Start via wireless debugging (or pair over USB)\n"
-                            + "3. come back here and press Prepare again")
-                    .setPositiveButton("OK", null)
+                    .setTitle("Shizuku 未运行")
+                    .setMessage("请先启动 Shizuku：\n\n"
+                            + "1. 打开 Shizuku 应用\n"
+                            + "2. 用「无线调试」启动（或通过 USB 配对启动）\n"
+                            + "3. 回到这里再点一次「准备」")
+                    .setPositiveButton("确定", null)
                     .show();
             return;
         }
         if (service == null) {
             bindService();
-            toast("Connecting to Shizuku...");
+            toast("正在连接 Shizuku…");
             return;
         }
-        toast("Preparing...");
+        toast("正在准备…");
         new Thread(() -> {
             try {
                 final String result = service.install(getPackageCodePath());
@@ -550,8 +655,8 @@ public class MainActivity extends Activity {
                     refreshDetails();
                 });
             } catch (Throwable t) {
-                addLog("prepare failed: " + t);
-                ui.post(() -> toast("prepare failed: " + t));
+                addLog("准备失败：" + t);
+                ui.post(() -> toast("准备失败：" + t));
             }
         }).start();
     }
@@ -562,63 +667,105 @@ public class MainActivity extends Activity {
 
     private void confirmRoot() {
         new AlertDialog.Builder(this)
-                .setTitle("Get a root shell?")
-                .setMessage("Runs CVE-2026-98260 once and keeps a uid=0 shell open.\n\n"
-                        + "- On a failed attempt the process is parked until you reboot\n"
-                        + "- Root disappears when you reboot\n"
-                        + "- Do not use the device while it runs")
-                .setPositiveButton("Run", (d, w) -> runRoot())
-                .setNegativeButton("Cancel", null)
+                .setTitle("获取 root Shell？")
+                .setMessage("运行一次 CVE-2026-98260，并保持一个 uid=0 的 shell。\n\n"
+                        + "- 失败时进程会挂起（park），只有重启能清理\n"
+                        + "- 重启后 root 消失\n"
+                        + "- 运行期间不要操作设备")
+                .setPositiveButton("运行", (d, w) -> runRoot())
+                .setNegativeButton("取消", null)
                 .show();
     }
 
     private void runRoot() {
         if (service == null) {
-            addLog("bind the service first");
+            addLog("请先绑定服务");
             return;
         }
         new Thread(() -> {
             try {
+                // Always (re)install before running: the binary may not exist
+                // yet (Prepare skipped) or may have been replaced by a new build.
+                String inst = service.install(getPackageCodePath());
+                addLog(inst);
+                if (inst.startsWith("安装失败") || inst.contains("conf=none")) {
+                    addLog("准备未完成，不启动提权");
+                    ui.post(() -> {
+                        toast(inst);
+                        refreshDetails();
+                    });
+                    return;
+                }
                 String out = service.openRoot();
-                rootOpen = out.contains("uid=0(root)") || out.contains("started");
+                rootOpen = out.startsWith("已获得 root");
                 addLog(out);
                 ui.post(this::applyDetails);
                 if (rootOpen && !"active".equals(ksu)) {
-                    addLog("root shell ready - loading KernelSU...");
-                    runKsu();
+                    // Do not auto-load KernelSU: the fake-cred stage needs its
+                    // own verified conf fields and parks on failure. Keep it a
+                    // manual, deliberate second step.
+                    addLog("已获得 root Shell —— KernelSU 是需要手动执行的第二步");
                 }
             } catch (Throwable t) {
-                addLog("root failed: " + t);
+                addLog("提权失败：" + t);
             }
         }).start();
     }
 
     private void confirmKsu() {
         new AlertDialog.Builder(this)
-                .setTitle("Load KernelSU?")
-                .setMessage("Late-loads ksud through a fake credential.\n\n"
-                        + "- On success su works in u:r:ksu:s0\n"
-                        + "- The parent process parks; reboot to clean up\n"
-                        + "- Do not use the device while it runs")
-                .setPositiveButton("Run", (d, w) -> runKsu())
-                .setNegativeButton("Cancel", null)
+                .setTitle("加载 KernelSU？")
+                .setMessage("用伪造的 cred 走一次 ksud late-load。\n\n"
+                        + "- 成功后 su 可在 u:r:ksu:s0 下使用\n"
+                        + "- 父进程会挂起（park），需要重启清理\n"
+                        + "- 运行期间不要操作设备")
+                .setPositiveButton("运行", (d, w) -> runKsu())
+                .setNegativeButton("取消", null)
                 .show();
     }
 
+    private long ksuStartedAt;
+
     private void runKsu() {
         if (service == null) {
-            addLog("bind the service first");
+            addLog("请先绑定服务");
             return;
         }
+        /*
+         * 22:32 那次日志里出现了两条一模一样的流程（:27 和 :28）——
+         * 重复点击会让两个 glk 进程各自 park，白白浪费一次开机。
+         * 两分钟内直接忽略。
+         */
+        if (System.currentTimeMillis() - ksuStartedAt < 120_000L) {
+            addLog("KernelSU 流程刚跑过，忽略这次点击（失败请先重启）");
+            return;
+        }
+        ksuStartedAt = System.currentTimeMillis();
         new Thread(() -> {
             try {
-                addLog(service.runDetached("fake"));
+                // The fake stage re-execs the binary from /data/local/tmp; if
+                // the user never pressed Prepare, that path does not exist yet.
+                String inst = service.install(getPackageCodePath());
+                addLog(inst);
+                if (inst.startsWith("安装失败") || inst.contains("conf=none")) {
+                    addLog("准备未完成，不加载 KernelSU");
+                    return;
+                }
+                String first = service.runDetached("fake");
+                addLog(first);
+                // runDetached 只带回启动后 2 秒的内容；后面整段在文件里，
+                // 不主动拉就会在一次 park 之后全部丢掉。
+                int seen = first.length();
                 final long start = System.currentTimeMillis();
                 boolean loaded = false;
                 String failure = null;
                 while (System.currentTimeMillis() - start < 90000) {
                     Thread.sleep(1000);
                     String tail = service.readLog();
+                    if (tail.length() > seen) {
+                        addLog(tail.substring(seen).trim());
+                        seen = tail.length();
+                    }
                     if (tail.contains("KSU_LOADED")) {
                         loaded = true;
                         break;
@@ -635,7 +782,7 @@ public class MainActivity extends Activity {
                     if (secs % 5 == 0) {
                         ui.post(() -> {
                             if (statusSubtitle != null) {
-                                statusSubtitle.setText("Loading KernelSU... " + secs + "s");
+                                statusSubtitle.setText("正在加载 KernelSU… " + secs + " 秒");
                             }
                         });
                     }
@@ -643,29 +790,48 @@ public class MainActivity extends Activity {
                 if (!loaded && failure == null) {
                     failure = "timed out after 90s";
                 }
+                if (!loaded) {
+                    // park 之后进程会一直挂着，先把 UI 日志 + 原生日志一起导出
+                    addLog(service.exportLog(uiLogText()));
+                }
                 if (loaded) {
                     parseInfo(service.info());
                 }
-                addLog(service.readLog());
+                /*
+                 * 只追加 seen 之后的部分。原来这里直接 addLog(readLog())，
+                 * 会把整个文件再贴一遍 —— 23:21 / 23:22 的日志里整段重复
+                 * 就是这个（同一个 pid 出现两次全流程）。
+                 */
+                String rest = service.readLog();
+                if (rest.length() > seen) {
+                    addLog(rest.substring(seen).trim());
+                    seen = rest.length();
+                }
+                final String suOut = loaded ? service.suCheck() : "";
+                if (loaded) {
+                    addLog("—— 验证 su ——\n" + suOut.trim());
+                }
                 final boolean ok = loaded;
+                final boolean suOk = suOut.contains("u:r:ksu:s0");
                 final String reason = failure;
                 ui.post(() -> {
                     applyDetails();
                     if (ok) {
-                        toast("KernelSU loaded (jailbreak mode)");
+                        toast(suOk ? "KernelSU 已加载，su 可用（u:r:ksu:s0）"
+                                : "KernelSU 已加载，但 su 还没通过验证，看日志");
                         refreshDetails();
                     } else {
-                        statusTitle.setText("KernelSU failed");
+                        statusTitle.setText("KernelSU 失败");
                         statusSubtitle.setText(reason + " - reboot, then retry");
                         statusBadge.setText("!");
                         statusBadge.setTextColor(RED);
-                        toast("KernelSU failed: " + reason);
-                        addLog("KernelSU failed: " + reason
+                        toast("KernelSU 失败：" + reason);
+                        addLog("KernelSU 失败：" + reason
                                 + " - parked processes remain; reboot to clean up");
                     }
                 });
             } catch (Throwable t) {
-                addLog("ksu failed: " + t);
+                addLog("KernelSU 执行失败：" + t);
             }
         }).start();
     }
@@ -680,18 +846,18 @@ public class MainActivity extends Activity {
                 rootOpen = false;
                 ui.post(this::applyDetails);
             } catch (Throwable t) {
-                addLog("stop failed: " + t);
+                addLog("停止失败：" + t);
             }
         }).start();
     }
 
     private void reboot() {
         new AlertDialog.Builder(this)
-                .setTitle("Reboot the device?")
-                .setMessage("This is the only way to clean up parked processes.")
-                .setPositiveButton("Reboot", (d, w) -> {
+                .setTitle("重启设备？")
+                .setMessage("这是清理挂起（park）进程的唯一办法。")
+                .setPositiveButton("重启", (d, w) -> {
                     if (service == null) {
-                        toast("bind the service first");
+                        toast("请先绑定服务");
                         return;
                     }
                     new Thread(() -> {
@@ -703,13 +869,13 @@ public class MainActivity extends Activity {
                         }
                     }).start();
                 })
-                .setNegativeButton("Cancel", null)
+                .setNegativeButton("取消", null)
                 .show();
     }
 
     private void run(String label, String args) {
         if (service == null) {
-            addLog("bind the service first");
+            addLog("请先绑定服务");
             return;
         }
         new Thread(() -> {
@@ -725,10 +891,17 @@ public class MainActivity extends Activity {
 
     private void bindService() {
         try {
+            // bindUserService() throws SecurityException while the permission
+            // is still denied; ask for it instead of logging a failure.
+            if (safePermission() != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                Shizuku.requestPermission(REQUEST_CODE);
+                addLog("已请求权限，授权后会自动连接");
+                return;
+            }
             Shizuku.bindUserService(serviceArgs(), connection);
-            addLog("binding user service...");
+            addLog("正在连接用户服务…");
         } catch (Throwable t) {
-            addLog("bind failed: " + t);
+            addLog("绑定失败：" + t);
         }
     }
 
@@ -738,14 +911,38 @@ public class MainActivity extends Activity {
                 .daemon(false)
                 .processNameSuffix("timer")
                 .debuggable(false)
-                .version(5);
+                .version(7);
+    }
+
+    /** 当前 UI 上的全部日志（导出和复制都用它）。 */
+    private String uiLogText() {
+        String text = logText == null ? "" : logText.getText().toString();
+        // Binder 事务上限 1 MB，留一半余量
+        return text.length() > 512 * 1024 ? text.substring(text.length() - 512 * 1024) : text;
+    }
+
+    private void exportLog() {
+        if (service == null) {
+            toast("请先绑定服务");
+            return;
+        }
+        final String text = uiLogText();
+        new Thread(() -> {
+            try {
+                String r = service.exportLog(text);
+                addLog(r);
+                ui.post(() -> toast(r));
+            } catch (Throwable t) {
+                addLog("导出失败：" + t);
+            }
+        }).start();
     }
 
     private void copyLog() {
         try {
             ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
             if (cm != null) {
-                cm.setPrimaryClip(ClipData.newPlainText("TimerRoot", logText.getText()));
+                cm.setPrimaryClip(ClipData.newPlainText("TimerRoot", uiLogText()));
                 addLog("log copied");
             }
         } catch (Throwable t) {

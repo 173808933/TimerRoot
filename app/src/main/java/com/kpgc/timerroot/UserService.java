@@ -24,8 +24,14 @@ import java.util.zip.ZipFile;
  */
 public class UserService extends IUserService.Stub {
 
+    /** 服务端版本标记：用来判断当前跑的 UserService 是不是新装的那份。 */
+    private static final String BUILD = "0.55";
+    private static final String PKG = "com.kpgc.timerroot";
     private static final String BIN = "/data/local/tmp/timer";
+    private static final String CONF = "/data/local/tmp/timer.conf";
     private static final String LOG = "/data/local/tmp/timer.log";
+    /** Copied from whichever installed manager ships lib/arm64/libksud.so. */
+    private static final String KSUD = "/data/local/tmp/ksud";
     private static final int MAX_OUTPUT = 20000;
 
     private Process rootProcess;
@@ -52,6 +58,8 @@ public class UserService extends IUserService.Stub {
     @Override
     public String install(String apk) {
         try {
+            String release = execOut("uname -r").trim();
+            String confPicked = null;
             try (ZipFile zf = new ZipFile(apk)) {
                 ZipEntry entry = zf.getEntry("assets/timer");
                 if (entry == null) {
@@ -71,11 +79,57 @@ public class UserService extends IUserService.Stub {
                 Process move = Runtime.getRuntime().exec(new String[]{"/system/bin/sh",
                         "-c", "chmod 755 " + tmp + " && mv -f " + tmp + " " + BIN});
                 move.waitFor();
+
+                // Pick the conf whose `release` matches uname -r exactly.
+                String fallback = null;
+                byte[] fallbackData = null;
+                java.util.Enumeration<? extends ZipEntry> en = zf.entries();
+                while (en.hasMoreElements()) {
+                    ZipEntry e = en.nextElement();
+                    // aapt2 on Windows may store nested asset paths with a
+                    // backslash; normalize before matching.
+                    String name = e.getName().replace('\\', '/');
+                    if (!name.startsWith("assets/conf/") || !name.endsWith(".conf")) {
+                        continue;
+                    }
+                    byte[] data;
+                    try (InputStream in = zf.getInputStream(e)) {
+                        data = readBytes(in);
+                    }
+                    if (fallbackData == null) {
+                        fallback = name;
+                        fallbackData = data;
+                    }
+                    String text = new String(data, "UTF-8");
+                    Matcher m = Pattern.compile("(?m)^\\s*release\\s*=\\s*\"([^\"]+)\"")
+                            .matcher(text);
+                    if (m.find() && m.group(1).equals(release)) {
+                        confPicked = name;
+                        fallbackData = data;
+                        break;
+                    }
+                }
+                if (confPicked == null) {
+                    /*
+                     * No conf matches this release.  Writing the fallback would
+                     * run the exploit with another kernel's offsets, which is
+                     * how a run turns into a panic instead of a clean failure.
+                     */
+                    return "conf=none（没有与 release=" + release
+                            + " 匹配的配置，请先导入对应 profile）";
+                }
+                try (FileOutputStream out = new FileOutputStream(CONF)) {
+                    out.write(fallbackData);
+                }
+                new File(CONF).setReadable(true, false);
             }
-            return "installed " + new File(BIN).length() + " bytes (uid="
-                    + android.system.Os.getuid() + ")";
+            String carried = backupPreviousLog();
+            return "已安装 " + new File(BIN).length() + " 字节，release=" + release
+                    + ", conf=" + (confPicked == null ? "none" : confPicked)
+                    + " (uid=" + android.system.Os.getuid() + ")\n" + prepareKsud()
+                    + "\n" + prepareSystem() + (carried.isEmpty() ? "" : "\n" + carried);
         } catch (Throwable t) {
-            return "install failed: " + t;
+            return "安装失败：" + t;
         }
     }
 
@@ -83,38 +137,39 @@ public class UserService extends IUserService.Stub {
     public String run(String args) {
         try {
             ProcessBuilder pb = new ProcessBuilder(
-                    "/system/bin/sh", "-c", BIN + " " + args + " 2>&1");
+                    "/system/bin/sh", "-c",
+                    BIN + " --conf " + CONF + " " + args + " 2>&1");
             pb.directory(new File("/data/local/tmp"));
             pb.redirectErrorStream(true);
             Process p = pb.start();
             String text = readAll(p.getInputStream());
             if (!p.waitFor(90, TimeUnit.SECONDS)) {
-                return text + "\n[timeout] still running after 90s - do not kill it,"
-                        + " reboot to clean up";
+                return text + "\n[超时] 90 秒仍未结束 —— 不要 kill，重启清理";
             }
             return text;
         } catch (Throwable t) {
-            return "run failed: " + t;
+            return "运行失败：" + t;
         }
     }
 
     @Override
     public String runDetached(String args) {
         try {
-            String cmd = "cd /data/local/tmp && setsid " + BIN + " " + args
-                    + " >" + LOG + " 2>&1 </dev/null &";
+            String cmd = "cd /data/local/tmp && setsid " + BIN + " --conf " + CONF
+                    + " " + args + " >" + LOG + " 2>&1 </dev/null &";
             Runtime.getRuntime().exec(new String[]{"/system/bin/sh", "-c", cmd});
             Thread.sleep(2000);
             return readLog();
         } catch (Throwable t) {
-            return "start failed: " + t;
+            return "启动失败：" + t;
         }
     }
 
     @Override
     public String readLog() {
         try (FileInputStream in = new FileInputStream(LOG)) {
-            return readAll(in);
+            // 1 MB 上限：原来的 20 KB 只读了文件头，fake 路线最关键的结尾会被裁掉
+            return readAll(in, 1024 * 1024);
         } catch (Throwable t) {
             return "";
         }
@@ -123,10 +178,10 @@ public class UserService extends IUserService.Stub {
     @Override
     public String openRoot() {
         if (rootProcess != null && rootProcess.isAlive()) {
-            return "root shell already open";
+            return "root Shell 已经打开";
         }
         try {
-            ProcessBuilder pb = new ProcessBuilder(BIN, "shell");
+            ProcessBuilder pb = new ProcessBuilder(BIN, "--conf", CONF, "shell");
             pb.directory(new File("/data/local/tmp"));
             pb.redirectErrorStream(true);
             rootProcess = pb.start();
@@ -146,29 +201,43 @@ public class UserService extends IUserService.Stub {
             });
             pump.setDaemon(true);
             pump.start();
-            Thread.sleep(6000);
-            String out = new String();
-            long deadline = System.currentTimeMillis() + 20000;
+            Thread.sleep(2000);
+            StringBuilder out = new StringBuilder();
+            boolean rooted = false;
+            long deadline = System.currentTimeMillis() + 60000;
+            long grace = 0;
             while (System.currentTimeMillis() < deadline) {
-                String line = rootLines.poll(100, TimeUnit.MILLISECONDS);
+                String line = rootLines.poll(200, TimeUnit.MILLISECONDS);
                 if (line == null) {
+                    if (rooted && grace > 0 && System.currentTimeMillis() > grace) {
+                        break;
+                    }
                     continue;
                 }
-                out += line + "\n";
-                if (line.contains("uid=0(root)")) {
+                out.append(line).append('\n');
+                if (!rooted && line.contains("uid=0(root)")) {
+                    rooted = true;
+                    // shell 启动时紧接着还会打 Uid/Gid/Cap 和 SELinux 上下文，
+                    // 立刻 break 会把这几行丢掉，留 1.2 秒收尾。
+                    grace = System.currentTimeMillis() + 1200;
+                    continue;
+                }
+                if (!rooted && (line.contains("shell exec failed")
+                        || line.contains("parking without reap"))) {
                     break;
                 }
             }
-            return "root shell started\n" + out.trim();
+            return (rooted ? "已获得 root\n" : "未获得 root\n")
+                    + out.toString().trim();
         } catch (Throwable t) {
-            return "openRoot failed: " + t;
+            return "打开 root Shell 失败：" + t;
         }
     }
 
     @Override
     public String execRoot(String cmd) {
         if (rootProcess == null || !rootProcess.isAlive()) {
-            return "root shell not open";
+            return "root Shell 未打开";
         }
         try {
             rootInput.write(cmd + " 2>&1\necho __END__\n");
@@ -187,7 +256,7 @@ public class UserService extends IUserService.Stub {
             }
             return sb.toString();
         } catch (Throwable t) {
-            return "execRoot failed: " + t;
+            return "命令执行失败：" + t;
         }
     }
 
@@ -203,16 +272,121 @@ public class UserService extends IUserService.Stub {
         String selinux = execOut("getenforce");
         String seccomp = execOut("grep -m1 Seccomp /proc/self/status | awk '{print $2}'");
         String ksud = "not loaded";
-        Matcher m = Pattern.compile("version=(ksud[^\\n]*)").matcher(readLog());
+        Matcher m = Pattern.compile("(?:version=|\\[ksu\\] ver=)([^\\n]*)").matcher(readLog());
         if (m.find()) {
             ksud = m.group(1).trim();
         } else if (selinux.contains("Permissive")) {
             ksud = "missing";
         }
-        String ksu = execOut("/system/bin/su -c id").contains("u:r:ksu:s0")
+        String ksu = execOut("timeout 3 /system/bin/su -c id 2>/dev/null").contains("u:r:ksu:s0")
                 ? "active" : "not loaded";
-        return "selinux=" + selinux + "\nseccomp=" + seccomp + "\nksud=" + ksud
-                + "\nksu=" + ksu + "\n";
+        return "build=" + BUILD + "\nselinux=" + selinux + "\nseccomp=" + seccomp
+                + "\nksud=" + ksud + "\nksu=" + ksu + "\n";
+    }
+
+    /**
+     * 导出日志。优先写应用侧那份（所有路线都有：shell、诊断、KSU），
+     * 再把 /data/local/tmp/timer.log 里的原生输出追加在后面。
+     * shell 在 sdcard_rw 组里，可以直接写 FUSE 目录。
+     */
+    @Override
+    public String exportLog(String uiText) {
+        try {
+            String ts = new java.text.SimpleDateFormat("MMdd-HHmmss", java.util.Locale.US)
+                    .format(new java.util.Date());
+            StringBuilder sb = new StringBuilder();
+            if (uiText != null && !uiText.isEmpty()) {
+                sb.append(uiText);
+                if (!uiText.endsWith("\n")) {
+                    sb.append('\n');
+                }
+            }
+            String raw = "";
+            File f = new File(LOG);
+            if (f.isFile() && f.length() > 0) {
+                sb.append("\n===== /data/local/tmp/timer.log =====\n");
+                try (FileInputStream in = new FileInputStream(f)) {
+                    sb.append(readAll(in, 1024 * 1024));
+                }
+            }
+            byte[] data = sb.toString().getBytes("UTF-8");
+            String[] dirs = {"/sdcard/Download", "/sdcard", "/data/local/tmp"};
+            for (String d : dirs) {
+                String out = d + "/timer-" + ts + ".log";
+                try (FileOutputStream fo = new FileOutputStream(out)) {
+                    fo.write(data);
+                } catch (Throwable ignored) {
+                    continue;
+                }
+                File o = new File(out);
+                if (o.isFile() && o.length() > 0) {
+                    return "日志已导出：" + out + "（" + o.length() + " 字节）";
+                }
+            }
+            return "导出失败：没有可写目录，可用 adb pull " + LOG;
+        } catch (Throwable t) {
+            return "导出失败：" + t;
+        }
+    }
+
+    /**
+     * 通过 rootd 执行命令。
+     *
+     * rootd 的 socket 是 0600 / shell(2000)，所以 App 自己连不上 —— 必须由
+     * 这个跑在 shell 域的用户服务代连。这也顺便把权限面收窄成"只有 shell"。
+     */
+    @Override
+    public String rootdExec(String cmd) {
+        android.net.LocalSocket sock = new android.net.LocalSocket();
+        try {
+            sock.connect(new android.net.LocalSocketAddress(
+                    "/data/local/tmp/rootd.sock",
+                    android.net.LocalSocketAddress.Namespace.FILESYSTEM));
+            java.io.OutputStream os = sock.getOutputStream();
+            os.write((cmd + "\n").getBytes("UTF-8"));
+            os.flush();
+            java.io.InputStream in = sock.getInputStream();
+            byte[] buf = new byte[8192];
+            StringBuilder sb = new StringBuilder();
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                sb.append(new String(buf, 0, n, "UTF-8"));
+                int e = sb.indexOf("__END__\n");
+                if (e >= 0) {
+                    return sb.substring(0, e);
+                }
+                if (sb.length() > 262144) {
+                    break;
+                }
+            }
+            return sb.length() == 0 ? "" : sb.toString();
+        } catch (Throwable t) {
+            return "rootd 不可用：" + t;
+        } finally {
+            try {
+                sock.close();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /**
+     * 端到端验证：以 shell(2000) 身份跑 su，看拿到的到底是不是 u:r:ksu:s0。
+     * 这是 KSU 是否真的可用的唯一判据 —— 模块载入不等于 su 能用。
+     */
+    @Override
+    public String suCheck() {
+        String su = "/system/bin/su";
+        if (!new File(su).exists()) {
+            return "su 不存在：" + su + "\n模块可能只加载了一半，或管理器路径不同";
+        }
+        String id = shell("timeout 5 " + su + " -c id 2>&1");
+        String enf = shell("timeout 5 " + su + " -c getenforce 2>&1");
+        String mods = shell("grep -c '^kernelsu ' /proc/modules 2>/dev/null");
+        return "su=" + su + "\n"
+                + "id=" + id.trim() + "\n"
+                + "getenforce=" + enf.trim() + "\n"
+                + "modules_kernelsu=" + mods.trim();
     }
 
     @Override
@@ -234,6 +408,235 @@ public class UserService extends IUserService.Stub {
             return p.waitFor();
         } catch (Throwable t) {
             return -1;
+        }
+    }
+
+    /**
+     * Finds a root manager by content, not by package name: any installed app
+     * whose nativeLibraryDir holds libksud.so is a valid manager, so forks and
+     * renamed builds work without a rebuild.  The first hit is copied to
+     * /data/local/tmp/ksud, which is what the late-load stage prefers; an
+     * existing copy (manual push, or a manager that was since uninstalled) is
+     * kept.
+     */
+    /**
+     * 跑漏洞前的固定步骤：清掉后台进程并刷盘。
+     *
+     * 抢页输掉的典型原因是"页刚释放就被别的分配拿走"，后台进程越少，
+     * 竞态窗口里发生的分配就越少。am kill-all 走 binder，shell 有
+     * KILL_BACKGROUND_PROCESSES 权限；失败了也继续跑，只是记一行警告。
+     */
+    /**
+     * 上一次运行的原生日志在 /data/local/tmp/timer.log，重启后仍在，但只有 shell
+     * 读得到；而重启后 Shizuku 一定是停的，App 根本连不上用户服务，也就导不出来。
+     * 所以在每次开跑之前，先把它拷到 App 自己的外部目录（shell 可写、App 免权限可读），
+     * 这样即使这次把内核跑崩，证据也留在了 /sdcard 上。
+     */
+    private String backupPreviousLog() {
+        try {
+            File log = new File(LOG);
+            if (!log.isFile() || log.length() == 0) {
+                return "";
+            }
+            String dir = "/sdcard/Android/data/" + PKG + "/files";
+            String dst = dir + "/last-run.log";
+            String r = shell("mkdir -p " + dir + " 2>&1; cp -f " + LOG + " " + dst
+                    + " 2>&1; echo __bk=$?").trim();
+            if (r.contains("__bk=0")) {
+                return "上一次的日志已备份：" + dst + "（" + log.length() + " 字节）";
+            }
+            /* 外部目录不可写时退回 /data/local/tmp，等 Shizuku 起来还能导 */
+            shell("cp -f " + LOG + " " + LOG + ".prev 2>/dev/null");
+            return "日志备份失败（" + r + "），已保留 " + LOG + ".prev";
+        } catch (Throwable t) {
+            return "日志备份异常：" + t;
+        }
+    }
+
+    private String prepareSystem() {
+        String before = memAvailableMb();
+        String r = shell("am kill-all 2>&1; sync; echo __prep_done__");
+        String after = memAvailableMb();
+        boolean ok = r.contains("__prep_done__");
+        return (ok ? "已清理后台：" : "清理后台失败（继续跑）：")
+                + "MemAvailable " + before + " -> " + after + " MB";
+    }
+
+    private String memAvailableMb() {
+        String v = shell("grep MemAvailable /proc/meminfo 2>/dev/null"
+                + " | awk '{print int($2/1024)}'").trim();
+        return v.isEmpty() ? "?" : v;
+    }
+
+    /**
+     * 找 root 管理器：按内容找 libksud.so，不看包名。
+     *
+     * /data/app 从 Android 11 起对 shell 是 0771（只有 x、没有 r），find 第一步
+     * opendir 就 EACCES；但通过 pm 走 binder 列包、拿到完整 apk 路径之后直接
+     * stat 是允许的。所以顺序是：
+     *   1. pm list packages -f，逐个看 <apk 同目录>/lib/<abi>/libksud.so
+     *   2. 没解压出来（extractNativeLibs=false）就从管理器 APK 里抽
+     *   3. 老设备上 find /data/app 兜底
+     */
+    /** 已知的管理器包名，排在前面；其余带 libksud.so 的包只作后备。 */
+    private static final String[] KSU_PACKAGES = {
+            "me.weishu.kernelsu", "me.weishu.kernelsu.pr", "com.rifsxd.ksunext",
+            "com.sukisu.ultra", "com.resukisu.resukisu", "org.bakasu.bakasu",
+            "com.kowx712.supermanager"
+    };
+
+    private static int ksuRank(String pkg) {
+        for (int i = 0; i < KSU_PACKAGES.length; i++) {
+            if (KSU_PACKAGES[i].equals(pkg)) {
+                return i;
+            }
+        }
+        return KSU_PACKAGES.length;
+    }
+
+    private String prepareKsud() {
+        java.util.ArrayList<String[]> apks = new java.util.ArrayList<>();
+        String listing = shell("pm list packages -f 2>/dev/null");
+        for (String line : listing.split("\n")) {
+            line = line.trim();
+            if (!line.startsWith("package:")) {
+                continue;
+            }
+            String body = line.substring(8);
+            int eq = body.lastIndexOf('=');
+            if (eq <= 0) {
+                continue;
+            }
+            apks.add(new String[]{body.substring(0, eq), body.substring(eq + 1)});
+        }
+        // pm 是按下标顺序输出的，com.* 会排在 me.* 前面；不排序就会选中
+        // 某个碰巧带 libksud.so 的普通 app（实测选到了 com.sevenk.core）。
+        apks.sort((a, b) -> Integer.compare(ksuRank(a[1]), ksuRank(b[1])));
+
+        // 1) lib 目录里就有 libksud.so
+        for (String[] a : apks) {
+            File dir = new File(a[0]).getParentFile();
+            if (dir == null) {
+                continue;
+            }
+            for (String abi : new String[]{"arm64", "arm"}) {
+                File c = new File(dir, "lib/" + abi + "/libksud.so");
+                if (c.isFile()) {
+                    return adoptKsud(c.getAbsolutePath(), a[1], "lib/" + abi);
+                }
+            }
+        }
+
+        // 2) 从管理器的 APK 里抽（只打开名字像管理器的包，避免几百次解压）
+        for (String[] a : apks) {
+            if (!looksLikeManager(a[1])) {
+                continue;
+            }
+            String r = extractKsud(a[0], a[1]);
+            if (r != null) {
+                return r;
+            }
+        }
+
+        // 3) 老设备兜底
+        String found = shell("find /data/app -name libksud.so -path '*/lib/arm64/*'"
+                + " 2>/dev/null | head -1").trim();
+        if (found.isEmpty()) {
+            found = shell("find /data/app -name libksud.so 2>/dev/null | head -1").trim();
+        }
+        if (!found.isEmpty()) {
+            return adoptKsud(found, "", "find");
+        }
+        return "ksud=none（pm 列出 " + apks.size() + " 个包，都没有 libksud.so；"
+                + "设备上没有装 KernelSU / Next / SukiSU 这类管理器）";
+    }
+
+    private static boolean looksLikeManager(String pkg) {
+        String p = pkg.toLowerCase();
+        return p.contains("ksu") || p.contains("sukisu") || p.contains("kernelsu")
+                || p.contains("supermanager") || p.contains("bakasu");
+    }
+
+    /** 复用已有副本（必须是真 ELF），否则从 src 复制并写包名 sidecar。 */
+    private String adoptKsud(String src, String pkg, String how) {
+        String sidecar = shell("cat " + KSUD + ".pkg 2>/dev/null | head -1").trim();
+        boolean existing = new File(KSUD).isFile()
+                && "7f454c46".equals(shell("head -c 4 '" + KSUD
+                        + "' 2>/dev/null | od -An -tx1 | tr -d ' \\n'"))
+                && pkg.equals(sidecar);
+        if (existing) {
+            return "ksud=" + KSUD + "（沿用现有文件，来源=" + src
+                    + "，方式=" + how + "，ver=" + ksudVersion() + "）";
+        }
+        shell("cp '" + src + "' " + KSUD + ".new 2>&1; chmod 755 " + KSUD
+                + ".new 2>/dev/null; mv -f " + KSUD + ".new " + KSUD);
+        if (!new File(KSUD).isFile()) {
+            return "ksud=复制失败，来源 " + src;
+        }
+        writePkg(pkg);
+        return "ksud=" + KSUD + "（来源=" + src + "，方式=" + how
+                + (pkg.isEmpty() ? "" : "，pkg=" + pkg)
+                + "，ver=" + ksudVersion() + "）";
+    }
+
+    /** ksud 的版本串里带 KMI，准备阶段就能看出和内核是否匹配。 */
+    private String ksudVersion() {
+        String v = shell(KSUD + " --version 2>&1 | head -1").trim();
+        return v.isEmpty() ? "unknown" : v;
+    }
+
+    /** libksud.so 打包在 APK 里时直接抽出来。 */
+    private String extractKsud(String apk, String pkg) {
+        try (ZipFile zf = new ZipFile(apk)) {
+            ZipEntry e = zf.getEntry("lib/arm64/libksud.so");
+            if (e == null) {
+                e = zf.getEntry("lib/arm/libksud.so");
+            }
+            if (e == null) {
+                return null;
+            }
+            String tmp = KSUD + ".new";
+            try (InputStream in = zf.getInputStream(e);
+                 FileOutputStream out = new FileOutputStream(tmp)) {
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                }
+            }
+            shell("chmod 755 " + tmp + " 2>/dev/null; mv -f " + tmp + " " + KSUD);
+            if (!new File(KSUD).isFile()) {
+                return null;
+            }
+            writePkg(pkg);
+            return "ksud=" + KSUD + "（从 APK 抽取：" + apk + "，pkg=" + pkg + "）";
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private void writePkg(String pkg) {
+        if (pkg == null || pkg.isEmpty() || !pkg.contains(".")) {
+            return;
+        }
+        try (FileOutputStream out = new FileOutputStream(KSUD + ".pkg")) {
+            out.write(pkg.getBytes("UTF-8"));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Shell output without the "unknown" placeholder execOut uses. */
+    private String shell(String cmd) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder("/system/bin/sh", "-c", cmd);
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            // pm list packages -f 能到几十 KB，这里不能用日志的 20 KB 上限
+            String text = readAll(p.getInputStream(), 4 * 1024 * 1024).trim();
+            p.waitFor();
+            return text;
+        } catch (Throwable t) {
+            return "";
         }
     }
 
@@ -265,7 +668,21 @@ public class UserService extends IUserService.Stub {
         rootInput = null;
     }
 
+    private static byte[] readBytes(InputStream in) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        byte[] buf = new byte[65536];
+        int n;
+        while ((n = in.read(buf)) > 0) {
+            bos.write(buf, 0, n);
+        }
+        return bos.toByteArray();
+    }
+
     private static String readAll(InputStream in) throws IOException {
+        return readAll(in, MAX_OUTPUT);
+    }
+
+    private static String readAll(InputStream in, int limit) throws IOException {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         byte[] buf = new byte[8192];
         int n;
@@ -273,7 +690,7 @@ public class UserService extends IUserService.Stub {
         while ((n = in.read(buf)) > 0) {
             bos.write(buf, 0, n);
             total += n;
-            if (total > MAX_OUTPUT) {
+            if (total > limit) {
                 break;
             }
         }
