@@ -15,4 +15,5 @@ interface IUserService {
     String exportLog(String uiText) = 11;
     String rootdExec(String cmd) = 12;
     String suCheck() = 13;
+    String importConf(String name, String text) = 14;
 }

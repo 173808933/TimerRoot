@@ -10,6 +10,10 @@ import android.content.ServiceConnection;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
+import android.content.Intent;
+import android.database.Cursor;
+import android.net.Uri;
+import android.provider.OpenableColumns;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
@@ -224,6 +228,7 @@ public class MainActivity extends Activity {
         LinearLayout tools3 = new LinearLayout(this);
         tools3.setOrientation(LinearLayout.HORIZONTAL);
         tools3.addView(pill("上次日志", TEXT, CARD, v -> showLastRun()), rowParams());
+        tools3.addView(pill("导入配置", TEXT, CARD, v -> pickConf()), rowParams());
         body.addView(tools3);
 
         body.addView(bigButton("获取 root Shell", GREEN, 0xFF04140A, v -> confirmRoot()));
@@ -547,6 +552,75 @@ public class MainActivity extends Activity {
      * 在已打开的 root shell 里跑一组只读检查：caps、SELinux 域、/data 访问、
      * su / ksud 是否存在。用来判断这份 uid=0 到底能干什么，以及 KSU 链路的前置条件。
      */
+    private static final int REQ_CONF = 0x0C0F;
+
+    /**
+     * 选一份 conf 导入。conf 由 PC 侧的 cve98260_auto.py 从 boot.img 生成，
+     * 或者手工写；导入后下次「准备」按 release 匹配自动取用，不用重新打包 APK。
+     */
+    private void pickConf() {
+        if (service == null) {
+            toast("请先绑定服务");
+            return;
+        }
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            startActivityForResult(i, REQ_CONF);
+        } catch (Throwable t) {
+            addLog("打不开文件选择器：" + t);
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != REQ_CONF || result != RESULT_OK || data == null || data.getData() == null) {
+            return;
+        }
+        final Uri uri = data.getData();
+        String name = "imported.conf";
+        try (Cursor c = getContentResolver().query(uri, null, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) {
+                    String s = c.getString(idx);
+                    if (s != null && !s.isEmpty()) {
+                        name = s;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // 名字拿不到就退回默认名，conf 里的 release 才是关键
+        }
+        final String fileName = name;
+        new Thread(() -> {
+            try (java.io.InputStream in = getContentResolver().openInputStream(uri)) {
+                if (in == null) {
+                    addLog("导入失败：读不到文件");
+                    return;
+                }
+                java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    bos.write(buf, 0, n);
+                    if (bos.size() > 256 * 1024) {
+                        addLog("导入失败：文件超过 256 KB，不像 conf");
+                        return;
+                    }
+                }
+                String text = new String(bos.toByteArray(), "UTF-8");
+                String r = service.importConf(fileName, text);
+                addLog(r);
+                ui.post(() -> toast(r.split("\n")[0]));
+            } catch (Throwable t) {
+                addLog("导入失败：" + t);
+            }
+        }).start();
+    }
+
     /**
      * 读上一次运行的原生日志。走 App 私有外部目录，不需要 Shizuku、不需要权限，
      * 所以重启后第一件事就能看上一轮到底死在哪一行。

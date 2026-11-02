@@ -132,6 +132,12 @@ python cve98260_auto.py boot.img --out profiles/
 一个 APK 可以同时带多份 conf（按 `uname -r` 选）。推导脚本与踩坑清单见
 `cve98260-autoport/`（`PORTING.md`）。
 
+App 里还有「导入配置」：选一份 `.conf` 就写进 `/data/local/tmp/conf.d/`，
+下次「准备」优先于内置的 `assets/conf/`。所以加一台机器**不一定要重新打包** ——
+拿到 `python cve98260_auto.py boot.img --out profiles/` 生成的 conf，
+手机上导入即可；导入时会校验 `release` 是否等于本机 `uname -r`，并明确告诉你
+"与本机一致"还是"不匹配（本机是 …）"。
+
 必要条件：漏洞未修补（没有 `posixtimer_exec`）、shell 域能写 tracefs、
 4 KiB 页。KSU 路线额外要求内核允许加载模块（`CONFIG_MODULES=y`、
 未开 `MODULE_SIG_FORCE`）。

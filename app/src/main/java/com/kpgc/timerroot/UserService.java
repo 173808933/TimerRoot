@@ -25,10 +25,12 @@ import java.util.zip.ZipFile;
 public class UserService extends IUserService.Stub {
 
     /** 服务端版本标记：用来判断当前跑的 UserService 是不是新装的那份。 */
-    private static final String BUILD = "0.56";
+    private static final String BUILD = "0.57";
     private static final String PKG = "com.kpgc.timerroot";
     private static final String BIN = "/data/local/tmp/timer";
     private static final String CONF = "/data/local/tmp/timer.conf";
+    /** 导入的 conf 放这里：shell 可写，且重启后还在（不像 filesDir 只属于 app）。 */
+    private static final String CONFDIR = "/data/local/tmp/conf.d";
     private static final String LOG = "/data/local/tmp/timer.log";
     /** Copied from whichever installed manager ships lib/arm64/libksud.so. */
     private static final String KSUD = "/data/local/tmp/ksud";
@@ -80,11 +82,26 @@ public class UserService extends IUserService.Stub {
                         "-c", "chmod 755 " + tmp + " && mv -f " + tmp + " " + BIN});
                 move.waitFor();
 
-                // Pick the conf whose `release` matches uname -r exactly.
-                String fallback = null;
+                /*
+                 * 选 conf 的优先级：
+                 *   1) 用户导入的 /data/local/tmp/conf.d/<release>.conf
+                 *   2) APK 内置的 assets/conf/
+                 * 两者都要求 release 与 uname -r 逐字相同 —— 拿别的内核偏移
+                 * 去写内存是 panic，不是"大概能用"。
+                 */
                 byte[] fallbackData = null;
+                String builtinSeen = null;
+                String imported = pickExternalConf(release);
+                if (imported != null) {
+                    try (FileInputStream in = new FileInputStream(imported)) {
+                        fallbackData = readBytes(in);
+                    }
+                    if (fallbackData != null && fallbackData.length > 0) {
+                        confPicked = imported;
+                    }
+                }
                 java.util.Enumeration<? extends ZipEntry> en = zf.entries();
-                while (en.hasMoreElements()) {
+                while (confPicked == null && en.hasMoreElements()) {
                     ZipEntry e = en.nextElement();
                     // aapt2 on Windows may store nested asset paths with a
                     // backslash; normalize before matching.
@@ -96,9 +113,9 @@ public class UserService extends IUserService.Stub {
                     try (InputStream in = zf.getInputStream(e)) {
                         data = readBytes(in);
                     }
-                    if (fallbackData == null) {
-                        fallback = name;
-                        fallbackData = data;
+                    // 记住第一份，只用于出错时报告"内置里有哪几份"
+                    if (builtinSeen == null) {
+                        builtinSeen = name;
                     }
                     String text = new String(data, "UTF-8");
                     Matcher m = Pattern.compile("(?m)^\\s*release\\s*=\\s*\"([^\"]+)\"")
@@ -116,7 +133,8 @@ public class UserService extends IUserService.Stub {
                      * how a run turns into a panic instead of a clean failure.
                      */
                     return "conf=none（没有与 release=" + release
-                            + " 匹配的配置，请先导入对应 profile）";
+                            + " 匹配的配置；内置 " + (builtinSeen == null ? "无" : builtinSeen)
+                            + "，可用「导入配置」补一份）";
                 }
                 try (FileOutputStream out = new FileOutputStream(CONF)) {
                     out.write(fallbackData);
@@ -367,6 +385,75 @@ public class UserService extends IUserService.Stub {
                 sock.close();
             } catch (Throwable ignored) {
             }
+        }
+    }
+
+    /**
+     * 在 /data/local/tmp/conf.d 里找 release 与 uname -r 完全一致的那份。
+     * 用 grep 一次拿到「路径:声明」，避免逐个读文件。
+     */
+    private String pickExternalConf(String release) {
+        String listing = shell("mkdir -p " + CONFDIR + " 2>/dev/null; "
+                + "grep -H '^[[:space:]]*release[[:space:]]*=' " + CONFDIR
+                + "/*.conf 2>/dev/null");
+        Pattern p = Pattern.compile("release\\s*=\\s*\"([^\"]+)\"");
+        for (String line : listing.split("\n")) {
+            int c = line.indexOf(':');
+            if (c <= 0) {
+                continue;
+            }
+            Matcher m = p.matcher(line.substring(c + 1));
+            if (m.find() && m.group(1).equals(release)) {
+                return line.substring(0, c).trim();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 导入一份 conf（文本由 App 侧从文件选择器读出后经 binder 传进来）。
+     * 只做校验 + 落盘，不立刻生效 —— 下次「准备」时按 release 匹配取用。
+     */
+    @Override
+    public String importConf(String name, String text) {
+        try {
+            if (text == null || text.trim().isEmpty()) {
+                return "导入失败：文件是空的";
+            }
+            Matcher m = Pattern.compile("(?m)^\\s*release\\s*=\\s*\"([^\"]+)\"")
+                    .matcher(text);
+            String rel = m.find() ? m.group(1).trim() : null;
+            if (rel == null) {
+                return "导入失败：没找到 release = \"…\" 这一行，这不像 TimerUAF 的 conf";
+            }
+            for (String k : new String[]{"timer_site", "selinux_state", "task_cred_off",
+                    "copy_process_low21", "task_alloc_bytes", "ksu_kmi"}) {
+                if (!Pattern.compile("(?m)^\\s*" + k + "\\s*=").matcher(text).find()) {
+                    return "导入失败：缺少必填字段 " + k + "（二进制会拒绝启动）";
+                }
+            }
+            File dir = new File(CONFDIR);
+            if (!dir.isDirectory() && !dir.mkdirs()) {
+                return "导入失败：建不了目录 " + CONFDIR;
+            }
+            String safe = (name == null || name.trim().isEmpty() ? rel : name.trim())
+                    .replaceAll("[^A-Za-z0-9._-]", "_");
+            if (!safe.endsWith(".conf")) {
+                safe += ".conf";
+            }
+            File out = new File(dir, safe);
+            try (FileOutputStream fo = new FileOutputStream(out)) {
+                fo.write(text.getBytes("UTF-8"));
+            }
+            out.setReadable(true, false);
+            String uname = execOut("uname -r").trim();
+            boolean match = rel.equals(uname);
+            return "已导入 " + out.getAbsolutePath() + "（" + out.length() + " 字节）\n"
+                    + "  release = " + rel + "\n"
+                    + (match ? "  与本机一致，下次「准备」就会用它"
+                             : "  注意：本机是 " + uname + "，不匹配，不会被使用");
+        } catch (Throwable t) {
+            return "导入失败：" + t;
         }
     }
 
