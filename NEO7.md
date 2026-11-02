@@ -8,6 +8,16 @@
 [rikumi/TimerRoot](https://github.com/rikumi/TimerRoot) 的 conf 驱动版本。
 本仓库把那份源码也收进来了：`native/timer.c`。
 
+## 支持的 release
+
+| release | 机型 | 状态 |
+|---|---|---|
+| `6.1.157-android14-11-o-ga43993466696` | realme Neo7 | 实机跑通（shell + KernelSU） |
+| `6.1.141-android14-11-o-g7598c3221214` | realme GT6 | conf 已推导并与旧 profile 交叉核对，尚未上机 |
+
+一个 APK 同时带两份 conf，安装时按 `uname -r` **精确匹配**选一份；匹配不上就
+拒绝启动（不会拿别的内核偏移去写内存）。加机型就是往 `assets/conf/` 里放一份新的。
+
 ## 实测状态
 
 设备：realme Neo7（ossi），`6.1.157-android14-11-o-ga43993466696`，SELinux Enforcing。
