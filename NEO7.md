@@ -77,7 +77,7 @@ KSU_LOADED
 ```bash
 git clone https://github.com/RikkaApps/Shizuku-API
 pwsh scripts/build.ps1 -Sdk "$env:LOCALAPPDATA\Android\Sdk" -ShizukuApi ..\Shizuku-API \
-     -VersionCode 56 -VersionName "0.55-neo7"
+     -VersionCode 57 -VersionName "0.56-multi"
 # → build/TimerRoot.apk
 ```
 
@@ -107,16 +107,16 @@ NDK=/opt/android-ndk sh native/build.sh    # 覆盖 app/src/main/assets/timer
 
 ## 保持与上游同步
 
-`main` 永远保持和上游一致（不动它），所有改动都在 `neo7` 分支上。
+`main` 永远保持和上游一致（不动它），所有改动都在 `conf-driven` 分支上。
 这样 GitHub 的 **Sync fork** 按钮可以直接用，或者在本地：
 
 ```bash
 git fetch upstream
 git checkout main && git merge --ff-only upstream/main && git push origin main   # 镜像上游
-git checkout neo7 && git merge main                                             # 把上游更新合进来
+git checkout conf-driven && git merge main                                      # 把上游更新合进来
 ```
 
-`neo7` 上的提交按「原生 / Android / 构建 / 文档」分开，冲突面很小：
+`conf-driven` 上的提交按「原生 / Android / 构建 / 文档」分开，冲突面很小：
 上游改 `MainActivity` / `UserService` 时，冲突集中在这两个文件，
 `native/` 与 `assets/conf/` 不受影响。
 
