@@ -8,6 +8,55 @@ The exploit itself is *not* included here. This repository is the app shell
 around it: UI, state detection and the Shizuku plumbing needed to run a
 shell-domain exploit from an ordinary app.
 
+## What this branch (`conf-driven`) changes
+
+Cut from `main` (upstream mirror `b97535b`): 11 commits, 20 files, +5695/−127.
+Everything is additive — upstream code paths stay untouched for devices that
+don't use these features.
+
+### 1. Exploit built from source, driven by a conf (`4562388`, `bce859b`)
+
+- `native/timer.c` (2.6k lines) and `native/build.sh`: a 6.1 port of the
+  POSIX-timer exploit, driven entirely by a text profile instead of hard-coded
+  offsets.
+- Ships two profiles under `app/src/main/assets/conf/`: realme Neo7 (6.1.157)
+  and realme GT6 (6.1.141).
+- `UserService.java` gains `rootdExec()` / `suCheck()` / `exportLog()` so one
+  race attempt can leave a resident `rootd` alive for the rest of the boot
+  instead of gambling again.
+- Chinese UI, plus a guard against starting the flow twice.
+
+### 2. Import a conf at runtime (`bed3d95`, `cda31a3`)
+
+A new device used to mean rebuilding the APK. Now a conf can be pushed to
+`/data/local/tmp/conf.d` or imported through the UI, validated against
+`uname -r` before use.
+
+`IUserService.aidl` grew four methods, so `UserServiceArgs.version` had to go
+7 → 8. Shizuku caches the user-service process keyed on that number; an old
+process would deserialise the new AIDL incorrectly.
+
+### 3. Derive a profile on the device (`7573859`)
+
+- `ota/BootImageParser.kt` (646 lines): unpacks boot v2–v4, decompresses the
+  gzip / lz4 / lz4-legacy kernel and locates the arm64 `Image`.
+- `ota/KallsymsExtractor.kt` (747 lines): recovers the compressed kallsyms
+  (token table, markers, names, offsets, relative base) straight from the image.
+- `ota/Deriver.kt`: turns those symbols plus BTF into a complete conf.
+
+Validated by generating profiles from two real boot images and diffing all 20
+fields against the hand-written confs — identical.
+
+### Behaviour differences
+
+| Scenario | Upstream | This branch |
+|---|---|---|
+| Device with a built-in conf | works | works, same code path |
+| Device without one | rebuild the APK | import a conf, or derive it from `boot.img` on the phone |
+| Second attempt in the same boot | — | blocked by `.lock2`; reboot first |
+
+---
+
 ## Why the app needs Shizuku
 
 An app runs as `untrusted_app` and cannot read `/sys/kernel/tracing`, which the
