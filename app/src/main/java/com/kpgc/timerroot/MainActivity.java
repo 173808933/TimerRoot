@@ -518,6 +518,11 @@ public class MainActivity extends Activity {
         cfg.addView(spacerX(8));
         cfg.addView(toolPill(R.string.tool_derive, v -> pickImage()), rowParams());
         card.addView(cfg);
+        LinearLayout cfg2 = new LinearLayout(this);
+        cfg2.setOrientation(LinearLayout.HORIZONTAL);
+        cfg2.addView(toolPill(R.string.tool_derive_ota, v -> promptOtaUrl()), rowParams());
+        card.addView(spacer(8));
+        card.addView(cfg2);
         card.addView(spacer(12));
 
         // 诊断类
@@ -992,6 +997,7 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 本地镜像：先拷到缓存目录，再走统一的推导入口。 */
     private void deriveFromImage(Uri uri, String fileName) {
         new Thread(() -> {
             File tmp = new File(getCacheDir(), "boot.img");
@@ -1016,29 +1022,7 @@ public class MainActivity extends Activity {
                     }
                 }
                 addLog("镜像已就位（" + total + " 字节），开始解析，可能要几十秒…");
-                Class<?> c = Class.forName("com.kpgc.timerroot.ota.Deriver");
-                Object r = c.getMethod("derive", String.class).invoke(null, tmp.getAbsolutePath());
-                String text = String.valueOf(r);
-                if (text.startsWith("ERR:")) {
-                    addLog("推导失败：" + text.substring(4).trim());
-                    return;
-                }
-                Matcher m = Pattern.compile("(?m)^\\s*release\\s*=\\s*\"([^\"]+)\"")
-                        .matcher(text);
-                String rel = m.find() ? m.group(1) : "derived";
-                String res = service.importConf(rel + ".conf", text);
-                addLog("推导完成（release=" + rel + "）\n" + res);
-                ui.post(() -> {
-                    toast("已生成并导入：" + rel);
-                    if (!res.startsWith("导入失败")) {
-                        // 新 conf 已落地，自动重跑一次准备，换掉 /data/local/tmp/timer.conf
-                        autoPrepared = false;
-                        maybeAutoPrepare();
-                    }
-                });
-            } catch (ClassNotFoundException e) {
-                addLog("此构建没有内置推导（编译时未找到 kotlinc）；"
-                        + "请用 PC 的 cve98260_auto.py 生成后再点「导入配置」");
+                deriveFromFile(tmp, fileName);
             } catch (Throwable t) {
                 addLog("推导失败：" + t);
             } finally {
@@ -1046,6 +1030,98 @@ public class MainActivity extends Activity {
                 tmp.delete();
             }
         }).start();
+    }
+
+    /** 输入 OTA 链接：只把 payload 里的 boot 分区按 Range 拉下来。 */
+    private void promptOtaUrl() {
+        final EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setHint("https://…/payload.bin 或 OTA zip 直链");
+        input.setText(getSharedPreferences("timerroot", MODE_PRIVATE)
+                .getString("ota_url", ""));
+        new AlertDialog.Builder(this)
+                .setTitle("从 OTA 链接推导")
+                .setMessage("只下载 boot 分区（通常几十 MB），不会整包下载几个 GB。\n"
+                        + "支持直链 payload.bin，也支持 payload.bin 以 Stored 方式存放的 OTA zip。")
+                .setView(input)
+                .setPositiveButton("开始", (d, w) -> {
+                    String url = input.getText().toString().trim();
+                    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                        toast("请输入 http/https 链接");
+                        return;
+                    }
+                    showTab(1);
+                    deriveFromOta(url);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void deriveFromOta(String url) {
+        new Thread(() -> {
+            File tmp = new File(getCacheDir(), "boot_ota.img");
+            try {
+                addLog("开始从 OTA 拉取 boot：" + url);
+                Class<?> c = Class.forName("com.kpgc.timerroot.ota.OtaBoot");
+                java.util.function.Consumer<String> sink = line -> addLog(line);
+                Object r = c.getMethod("fetchBoot", String.class, File.class,
+                                java.util.function.Consumer.class)
+                        .invoke(null, url, tmp, sink);
+                String err = String.valueOf(r);
+                if (!err.isEmpty()) {
+                    addLog("OTA 拉取失败：" + err.replace("ERR:", "").trim());
+                    ui.post(() -> toast("OTA 拉取失败，看日志"));
+                    return;
+                }
+                getSharedPreferences("timerroot", MODE_PRIVATE).edit()
+                        .putString("ota_url", url).apply();
+                addLog("boot 分区已下载，开始解析…");
+                deriveFromFile(tmp, "OTA 链接");
+            } catch (ClassNotFoundException e) {
+                addLog("此构建没有内置 OTA 解析（编译时未找到 kotlinc）");
+            } catch (Throwable t) {
+                addLog("OTA 推导失败：" + t);
+            } finally {
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+            }
+        }).start();
+    }
+
+    /** 拿到 boot.img 之后的共同部分：解析 → 导入 → 自动重跑准备。 */
+    private void deriveFromFile(File img, String label) {
+        if (service == null) {
+            addLog("请先连接 Shizuku（需要它把 conf 写进 /data/local/tmp/conf.d）");
+            ui.post(() -> toast("请先连接 Shizuku"));
+            return;
+        }
+        try {
+            Class<?> c = Class.forName("com.kpgc.timerroot.ota.Deriver");
+            Object r = c.getMethod("derive", String.class).invoke(null, img.getAbsolutePath());
+            String text = String.valueOf(r);
+            if (text.startsWith("ERR:")) {
+                addLog("推导失败：" + text.substring(4).trim());
+                return;
+            }
+            Matcher m = Pattern.compile("(?m)^\\s*release\\s*=\\s*\"([^\"]+)\"")
+                    .matcher(text);
+            String rel = m.find() ? m.group(1) : "derived";
+            String res = service.importConf(rel + ".conf", text);
+            addLog("推导完成（release=" + rel + "，来源 " + label + "）\n" + res);
+            ui.post(() -> {
+                toast("已生成并导入：" + rel);
+                if (!res.startsWith("导入失败")) {
+                    // 新 conf 已落地，自动重跑一次准备，换掉 /data/local/tmp/timer.conf
+                    autoPrepared = false;
+                    maybeAutoPrepare();
+                }
+            });
+        } catch (ClassNotFoundException e) {
+            addLog("此构建没有内置推导（编译时未找到 kotlinc）；"
+                    + "请用 PC 的 cve98260_auto.py 生成后再点「导入配置」");
+        } catch (Throwable t) {
+            addLog("推导失败：" + t);
+        }
     }
 
     private void pickConf() {

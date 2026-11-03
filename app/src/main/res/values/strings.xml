@@ -44,6 +44,7 @@
     <string name="tool_log">日志</string>
     <string name="tool_import">导入配置</string>
     <string name="tool_derive">推导配置</string>
+    <string name="tool_derive_ota">OTA 链接推导</string>
     <string name="tool_prepare">准备</string>
     <string name="tool_diag">诊断</string>
     <string name="tool_selfcheck">自检</string>

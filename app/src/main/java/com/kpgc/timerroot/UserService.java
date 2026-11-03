@@ -25,7 +25,7 @@ import java.util.zip.ZipFile;
 public class UserService extends IUserService.Stub {
 
     /** 服务端版本标记：用来判断当前跑的 UserService 是不是新装的那份。 */
-    private static final String BUILD = "0.60";
+    private static final String BUILD = "0.61";
     private static final String PKG = "com.kpgc.timerroot";
     private static final String BIN = "/data/local/tmp/timer";
     private static final String CONF = "/data/local/tmp/timer.conf";
