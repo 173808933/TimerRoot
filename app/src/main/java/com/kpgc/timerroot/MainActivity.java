@@ -42,6 +42,8 @@ import java.util.Locale;
 
 import rikka.shizuku.Shizuku;
 
+import java.lang.reflect.Method;
+
 /**
  * Front end for CVE-2026-98260 (posix CPU timer UAF).
  *
@@ -54,43 +56,73 @@ public class MainActivity extends Activity {
     private static final String TAG = "TimerRoot";
     private static final int REQUEST_CODE = 1001;
 
-    private static final int BG = 0xFF0B0B0B;
-    private static final int CARD = 0xFF1C1C1E;
-    private static final int LINE = 0xFF2A2A2C;
-    private static final int TEXT = 0xFFFFFFFF;
-    private static final int MUTED = 0xFF9A9A9A;
-    private static final int GREEN = 0xFF2FD06B;
-    private static final int GREEN_DARK = 0xFF123D24;
-    private static final int RED = 0xFFFF5C5C;
-
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final SimpleDateFormat clock = new SimpleDateFormat("HH:mm:ss", Locale.US);
 
     private IUserService service;
     private boolean bound;
+    /** 准备阶段正在跑，防止自动+手动同时触发两次 install。 */
+    private boolean preparing;
+    /** 本次进程是否已经自动准备过（失败也置位，避免反复清后台）。 */
+    private boolean autoPrepared;
     private boolean rootOpen;
 
-    private LinearLayout statusCard;
+    // ---- 状态总览卡 (A) ----
     private TextView statusTitle;
     private TextView statusSubtitle;
-    private TextView statusBadge;
+    private TextView statusSummary;
+
+    // ---- 引导/依赖卡 (B) ----
+    private LinearLayout guideCard;
+    private TextView[] stepDots;
+    private TextView[] stepLabels;
+    private LinearLayout guideBanner;
+    private TextView bannerText;
+
+    // ---- 主操作区 (C) ----
+    private TextView actionRootBtn;
+    private TextView actionRootHint;
+    private TextView actionKsuBtn;
+    private TextView actionKsuHint;
+    private TextView actionStopBtn;
+
+    // ---- 设备详情卡 (D) ----
+    private LinearLayout detailBody;
+    private TextView detailChevron;
     private TextView detailModel;
     private TextView detailKernel;
+    private TextView detailKernelVer;
     private TextView detailKsud;
     private TextView detailKsu;
     private TextView detailMgr;
     private TextView detailSelinux;
     private TextView detailSeccomp;
+    private TextView detailRootState;
+
+    // ---- 日志 (Log 页) ----
     private TextView logText;
     private LinearLayout homePage;
     private LinearLayout logPage;
     private TextView tabHome;
     private TextView tabLog;
+    private ScrollView logScroll;
+    private boolean autoScroll = true;
+    private TextView backToBottomBtn;
+    private FrameLayout logContainer;
+
     private String ksud = "-";
     private String ksu = "unknown";
     private String mgr = "auto";
     private String selinux = "-";
     private String seccomp = "-";
+
+    private int colorBg;
+    private int colorTextPrimary;
+    private int colorTextSecondary;
+    private int colorTextWeak;
+    private int colorGreen;
+    private int colorRed;
+    private int colorAmber;
 
     private final ServiceConnection connection = new ServiceConnection() {
         @Override
@@ -99,6 +131,7 @@ public class MainActivity extends Activity {
             bound = true;
             addLog("用户服务已连接");
             refreshDetails();
+            maybeAutoPrepare();
         }
 
         @Override
@@ -115,8 +148,23 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         Log.i(TAG, "onCreate");
 
+        // 背景模糊：API 31+ 用窗口级模糊，API 30 降级为玻璃 solid alpha 提到 18%。
+        // setBackgroundBlur* 是隐藏 API（@hide），不能直接引用（纯 SDK 编译会失败），
+        // 故走反射，失败则静默降级为 solid alpha 玻璃。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            applyBackgroundBlur();
+        }
+
+        loadColors();
+
         final FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(BG);
+        // 背景：风景照（居中裁剪铺满），玻璃卡片叠在其上
+        android.widget.ImageView bg = new android.widget.ImageView(this);
+        bg.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+        bg.setImageResource(R.drawable.bg_landscape);
+        bg.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        root.addView(bg, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             v.setPadding(0, insets.getSystemWindowInsetTop(), 0,
                     insets.getSystemWindowInsetBottom());
@@ -147,165 +195,487 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void loadColors() {
+        colorBg = getResources().getColor(R.color.bg);
+        colorTextPrimary = getResources().getColor(R.color.text_primary);
+        colorTextSecondary = getResources().getColor(R.color.text_secondary);
+        colorTextWeak = getResources().getColor(R.color.text_weak);
+        colorGreen = getResources().getColor(R.color.state_green);
+        colorRed = getResources().getColor(R.color.state_red);
+        colorAmber = getResources().getColor(R.color.state_amber);
+    }
+
+    /** 反射调用 Window#setBackgroundBlurEnabled / setBackgroundBlurRadius（隐藏 API）。 */
+    private void applyBackgroundBlur() {
+        try {
+            android.view.Window w = getWindow();
+            Method enable = android.view.Window.class.getMethod("setBackgroundBlurEnabled", boolean.class);
+            enable.invoke(w, true);
+            Method radius = android.view.Window.class.getMethod("setBackgroundBlurRadius", int.class);
+            radius.invoke(w, 64);
+        } catch (Throwable t) {
+            Log.i(TAG, "background blur unavailable (fallback to solid alpha): " + t);
+        }
+    }
+
     // ------------------------------------------------------------------ UI
 
     private LinearLayout buildHome() {
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setBackgroundColor(BG);
+        page.setBackgroundColor(android.graphics.Color.TRANSPARENT);
 
         ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(16), dp(12), dp(16), dp(16));
+        body.setPadding(dp(20), dp(12), dp(20), dp(20));
         scroll.addView(body);
         page.addView(scroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
+        // 大标题
+        TextView title = new TextView(this);
+        title.setText(R.string.title_home);
+        title.setTextColor(colorTextPrimary);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setLineSpacing(0f, 1.3f);
+        body.addView(title);
+        body.addView(spacer(12));
+
+        // ---- A 状态总览卡（置顶不折叠） ----
+        body.addView(buildStatusCard());
+        body.addView(spacer(12));
+
+        // ---- B 引导/依赖卡 ----
+        guideCard = buildGuideCard();
+        body.addView(guideCard);
+        body.addView(spacer(12));
+
+        // ---- C 主操作区 ----
+        body.addView(buildActionsCard());
+        body.addView(spacer(12));
+
+        // ---- D 设备详情卡（默认折叠） ----
+        body.addView(buildDetailsCard());
+        body.addView(spacer(12));
+
+        // ---- E 工具区 ----
+        body.addView(buildToolsCard());
+
+        return page;
+    }
+
+    private LinearLayout buildStatusCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setBackgroundResource(R.drawable.bg_glass_card);
+
+        statusTitle = new TextView(this);
+        statusTitle.setText(R.string.status_disconnected);
+        statusTitle.setTextColor(colorTextPrimary);
+        statusTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
+        statusTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        statusTitle.setLineSpacing(0f, 1.3f);
+        card.addView(statusTitle);
+
+        statusSubtitle = new TextView(this);
+        statusSubtitle.setText(R.string.status_disconnected);
+        statusSubtitle.setTextColor(colorTextSecondary);
+        statusSubtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        statusSubtitle.setLineSpacing(0f, 1.5f);
+        card.addView(statusSubtitle);
+
+        card.addView(spacer(8));
+
+        statusSummary = new TextView(this);
+        statusSummary.setTextColor(colorTextWeak);
+        statusSummary.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        statusSummary.setLineSpacing(0f, 1.5f);
+        card.addView(statusSummary);
+
+        return card;
+    }
+
+    private LinearLayout buildGuideCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setBackgroundResource(R.drawable.bg_glass_card);
+
+        TextView title = new TextView(this);
+        title.setText(R.string.guide_title);
+        title.setTextColor(colorTextPrimary);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setLineSpacing(0f, 1.3f);
+        card.addView(title);
+        card.addView(spacer(12));
+
+        // 4 步进度：Shizuku → 准备 → 诊断 → 获取 root Shell
+        String[] labels = {
+                getString(R.string.step_shizuku),
+                getString(R.string.step_prepare),
+                getString(R.string.step_diagnose),
+                getString(R.string.step_root)
+        };
+        stepDots = new TextView[labels.length];
+        stepLabels = new TextView[labels.length];
+        for (int i = 0; i < labels.length; i++) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(6), 0, dp(6));
+
+            TextView dot = new TextView(this);
+            dot.setText("•");
+            dot.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            dot.setGravity(Gravity.CENTER);
+            dot.setLayoutParams(new LinearLayout.LayoutParams(dp(24), dp(24)));
+            dot.setTextColor(colorTextWeak);
+            stepDots[i] = dot;
+            row.addView(dot);
+
+            TextView label = new TextView(this);
+            label.setText(labels[i]);
+            label.setTextColor(colorTextSecondary);
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            label.setLineSpacing(0f, 1.5f);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            lp.leftMargin = dp(12);
+            row.addView(label, lp);
+            stepLabels[i] = label;
+
+            card.addView(row);
+        }
+
+        card.addView(spacer(4));
+
+        // 未授权时的琥珀提示条 + 去授权按钮（默认隐藏）
+        guideBanner = new LinearLayout(this);
+        guideBanner.setOrientation(LinearLayout.VERTICAL);
+        guideBanner.setPadding(dp(12), dp(12), dp(12), dp(12));
+        GradientDrawable bannerBg = new GradientDrawable();
+        bannerBg.setColor(0x1AFFB020);
+        bannerBg.setCornerRadius(dp(16));
+        bannerBg.setStroke(dp(1), 0x33FFB020);
+        guideBanner.setBackground(bannerBg);
+        bannerText = new TextView(this);
+        bannerText.setTextColor(colorAmber);
+        bannerText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        bannerText.setLineSpacing(0f, 1.5f);
+        guideBanner.addView(bannerText);
+        guideBanner.addView(spacer(8));
+        TextView grant = new TextView(this);
+        grant.setText(R.string.grant_shizuku);
+        grant.setTextColor(colorAmber);
+        grant.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        grant.setGravity(Gravity.CENTER);
+        grant.setPadding(dp(12), dp(10), dp(12), dp(10));
+        GradientDrawable grantBg = new GradientDrawable();
+        grantBg.setColor(0x26FFB020);
+        grantBg.setCornerRadius(dp(999));
+        grant.setBackground(grantBg);
+        grant.setOnClickListener(v -> showShizuku());
+        guideBanner.addView(grant);
+        guideBanner.setVisibility(View.GONE);
+        card.addView(guideBanner);
+
+        return card;
+    }
+
+    private LinearLayout buildActionsCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setBackgroundResource(R.drawable.bg_glass_card);
+
+        // 获取 root Shell
+        actionRootBtn = actionButton(R.string.action_root, true, v -> confirmRoot());
+        card.addView(actionRootBtn);
+        actionRootHint = actionHint(R.string.action_root);
+        card.addView(actionRootHint);
+        card.addView(spacer(12));
+
+        // 加载 KernelSU
+        actionKsuBtn = actionButton(R.string.action_ksu, true, v -> confirmKsu());
+        card.addView(actionKsuBtn);
+        actionKsuHint = actionHint(R.string.action_ksu);
+        card.addView(actionKsuHint);
+        card.addView(spacer(12));
+
+        // 停止
+        actionStopBtn = actionButton(R.string.action_stop, false, v -> stopRoot());
+        card.addView(actionStopBtn);
+        card.addView(spacer(4));
+
+        // 常驻风险提示
+        TextView risk = new TextView(this);
+        risk.setText(R.string.risk_hint);
+        risk.setTextColor(colorTextWeak);
+        risk.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        risk.setLineSpacing(0f, 1.5f);
+        card.addView(risk);
+
+        return card;
+    }
+
+    private TextView actionButton(int textRes, boolean primary, View.OnClickListener click) {
+        TextView view = new TextView(this);
+        view.setText(textRes);
+        view.setTextColor(primary ? colorBg : 0xFFFFFFFF);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        view.setGravity(Gravity.CENTER);
+        view.setPadding(dp(16), dp(14), dp(16), dp(14));
+        view.setMinimumHeight(dp(48));
+        view.setBackgroundResource(primary
+                ? R.drawable.bg_primary_btn_selector : R.drawable.bg_danger_btn);
+        view.setOnClickListener(click);
+        return view;
+    }
+
+    private TextView actionHint(int textRes) {
+        TextView view = new TextView(this);
+        view.setText(textRes);
+        view.setTextColor(colorTextWeak);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        view.setLineSpacing(0f, 1.5f);
+        view.setPadding(0, dp(4), 0, 0);
+        return view;
+    }
+
+    private LinearLayout buildDetailsCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackgroundResource(R.drawable.bg_glass_card);
+
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(16), dp(14), dp(16), dp(14));
+        header.setMinimumHeight(dp(48));
+
         TextView title = new TextView(this);
-        title.setText("TimerRoot Neo7");
-        title.setTextColor(TEXT);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setText(R.string.detail_title);
+        title.setTextColor(colorTextPrimary);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setLineSpacing(0f, 1.3f);
         header.addView(title, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        header.addView(pill("重启", RED, CARD, v -> reboot()));
-        body.addView(header);
-        body.addView(spacer(12));
 
-        statusCard = new LinearLayout(this);
-        statusCard.setOrientation(LinearLayout.HORIZONTAL);
-        statusCard.setGravity(Gravity.CENTER_VERTICAL);
-        statusCard.setPadding(dp(18), dp(18), dp(18), dp(18));
-        statusCard.setBackground(cardBackground(CARD));
-        LinearLayout texts = new LinearLayout(this);
-        texts.setOrientation(LinearLayout.VERTICAL);
-        statusTitle = new TextView(this);
-        statusTitle.setText("未连接");
-        statusTitle.setTextColor(TEXT);
-        statusTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
-        statusTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        statusSubtitle = new TextView(this);
-        statusSubtitle.setText("请先启动 Shizuku");
-        statusSubtitle.setTextColor(0xFFBFD8C6);
-        statusSubtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        texts.addView(statusTitle);
-        texts.addView(spacer(4));
-        texts.addView(statusSubtitle);
-        statusCard.addView(texts, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        statusBadge = new TextView(this);
-        statusBadge.setText("?");
-        statusBadge.setTextColor(GREEN);
-        statusBadge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 44);
-        statusBadge.setTypeface(Typeface.DEFAULT_BOLD);
-        statusCard.addView(statusBadge);
-        body.addView(statusCard);
-        body.addView(spacer(14));
+        detailChevron = new TextView(this);
+        detailChevron.setCompoundDrawablesWithIntrinsicBounds(0, 0, R.drawable.ic_chevron_down, 0);
+        header.addView(detailChevron);
 
-        LinearLayout details = new LinearLayout(this);
-        details.setOrientation(LinearLayout.VERTICAL);
-        details.setBackground(cardBackground(CARD));
-        detailModel = addRow(details, "机型", "-", true);
-        detailKernel = addRow(details, "内核", "-", true);
-        detailKsud = addRow(details, "ksud", "-", true);
-        detailKsu = addRow(details, "KernelSU", "-", true);
-        detailMgr = addRow(details, "管理器", "自动识别 · 点此指定", true);
+        header.setOnClickListener(v -> toggleDetails());
+        card.addView(header);
+
+        detailBody = new LinearLayout(this);
+        detailBody.setOrientation(LinearLayout.VERTICAL);
+        detailBody.setPadding(dp(16), 0, dp(16), dp(12));
+
+        detailModel = addRow(detailBody, R.string.detail_model, "-");
+        detailKernel = addRow(detailBody, R.string.detail_kernel, "-");
+        detailKernelVer = addRow(detailBody, R.string.detail_kernel_ver, "-");
+        detailKsud = addRow(detailBody, R.string.detail_ksud, "-");
+        detailKsu = addRow(detailBody, R.string.detail_ksu, "-");
+        detailSelinux = addRow(detailBody, R.string.detail_selinux, "-");
+        detailSeccomp = addRow(detailBody, R.string.detail_seccomp, "-");
+        detailRootState = addRow(detailBody, R.string.detail_root, "-");
+        detailMgr = addRow(detailBody, R.string.detail_manager, "-");
+        detailMgr.setText(describeManager());
         ((View) detailMgr.getParent()).setOnClickListener(v -> showManagerPicker());
-        detailSelinux = addRow(details, "SELinux", "-", true);
-        detailSeccomp = addRow(details, "Seccomp", "-", false);
-        body.addView(details);
-        body.addView(spacer(14));
 
-        LinearLayout tools = new LinearLayout(this);
-        tools.setOrientation(LinearLayout.HORIZONTAL);
-        tools.addView(pill("Shizuku", TEXT, CARD, v -> showShizuku()), rowParams());
-        tools.addView(pill("准备", TEXT, CARD, v -> prepare()), rowParams());
-        tools.addView(pill("诊断", TEXT, CARD, v -> run("ids", "ids")), rowParams());
-        tools.addView(pill("日志", TEXT, CARD, v -> showTab(1)), rowParams());
-        body.addView(tools);
+        card.addView(detailBody);
 
-        LinearLayout tools2 = new LinearLayout(this);
-        tools2.setOrientation(LinearLayout.HORIZONTAL);
-        tools2.addView(pill("自检", TEXT, CARD, v -> selfCheck()), rowParams());
-        tools2.addView(pill("root 命令", TEXT, CARD, v -> rootdPrompt()), rowParams());
-        body.addView(tools2);
+        // 默认折叠
+        detailBody.setVisibility(View.GONE);
+        return card;
+    }
 
-        LinearLayout tools3 = new LinearLayout(this);
-        tools3.setOrientation(LinearLayout.HORIZONTAL);
-        tools3.addView(pill("上次日志", TEXT, CARD, v -> showLastRun()), rowParams());
-        tools3.addView(pill("导入配置", TEXT, CARD, v -> pickConf()), rowParams());
-        tools3.addView(pill("推导配置", TEXT, CARD, v -> pickImage()), rowParams());
-        body.addView(tools3);
+    private void toggleDetails() {
+        boolean visible = detailBody.getVisibility() == View.VISIBLE;
+        detailBody.setVisibility(visible ? View.GONE : View.VISIBLE);
+        detailChevron.setRotation(visible ? 0f : 180f);
+    }
 
-        body.addView(bigButton("获取 root Shell", GREEN, 0xFF04140A, v -> confirmRoot()));
-        body.addView(spacer(8));
-        body.addView(bigButton("加载 KernelSU", 0xFF1F7A3D, 0xFFE8FFF0, v -> confirmKsu()));
-        body.addView(spacer(8));
-        body.addView(bigButton("停止", CARD, RED, v -> stopRoot()));
+    private LinearLayout buildToolsCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setBackgroundResource(R.drawable.bg_glass_card);
 
-        body.addView(spacer(18));
-        body.addView(smallHint("第一次使用：先授权 Shizuku，再点「准备」。准备会把 Neo7 的漏洞程序和与 uname -r 匹配的配置写入设备。"
-                + "「诊断」只跑事件 id 发现，不触发漏洞；日志里要能看到 burst hit=1 才算真正命中。"));
-        body.addView(spacer(8));
+        // 配置类
+        card.addView(toolGroupTitle(R.string.tool_config));
+        LinearLayout cfg = new LinearLayout(this);
+        cfg.setOrientation(LinearLayout.HORIZONTAL);
+        cfg.addView(toolPill(R.string.tool_import, v -> pickConf()), rowParams());
+        cfg.addView(spacerX(8));
+        cfg.addView(toolPill(R.string.tool_derive, v -> pickImage()), rowParams());
+        card.addView(cfg);
+        card.addView(spacer(12));
 
+        // 诊断类
+        card.addView(toolGroupTitle(R.string.tool_diagnose));
+        LinearLayout diag = new LinearLayout(this);
+        diag.setOrientation(LinearLayout.HORIZONTAL);
+        diag.addView(toolPill(R.string.tool_prepare, v -> prepare()), rowParams());
+        diag.addView(spacerX(8));
+        diag.addView(toolPill(R.string.tool_diag, v -> run("ids", "ids")), rowParams());
+        diag.addView(spacerX(8));
+        diag.addView(toolPill(R.string.tool_selfcheck, v -> selfCheck()), rowParams());
+        card.addView(diag);
+        card.addView(spacer(12));
 
+        // 日志类
+        card.addView(toolGroupTitle(R.string.tool_log));
+        LinearLayout lg = new LinearLayout(this);
+        lg.setOrientation(LinearLayout.HORIZONTAL);
+        lg.addView(toolPill(R.string.tool_lastlog, v -> showLastRun()), rowParams());
+        lg.addView(spacerX(8));
+        lg.addView(toolPill(R.string.tool_rootcmd, v -> rootdPrompt()), rowParams());
+        lg.addView(spacerX(8));
+        lg.addView(toolPill(R.string.tool_shizuku, v -> showShizuku()), rowParams());
+        card.addView(lg);
 
-        return page;
+        return card;
+    }
+
+    private TextView toolGroupTitle(int textRes) {
+        TextView view = new TextView(this);
+        view.setText(textRes);
+        view.setTextColor(colorTextWeak);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        view.setLineSpacing(0f, 1.3f);
+        view.setPadding(0, 0, 0, dp(8));
+        return view;
+    }
+
+    private TextView toolPill(int textRes, View.OnClickListener click) {
+        TextView view = new TextView(this);
+        view.setText(textRes);
+        view.setTextColor(colorTextSecondary);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        view.setGravity(Gravity.CENTER);
+        view.setPadding(dp(8), dp(12), dp(8), dp(12));
+        view.setMinimumHeight(dp(48));
+        view.setBackgroundResource(R.drawable.bg_glass_pill_selector);
+        view.setOnClickListener(click);
+        return view;
+    }
+
+    private View spacerX(int heightDp) {
+        View v = new View(this);
+        v.setLayoutParams(new LinearLayout.LayoutParams(dp(heightDp), 1));
+        return v;
     }
 
     private LinearLayout buildLog() {
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setBackgroundColor(BG);
-        page.setPadding(dp(16), dp(12), dp(16), dp(8));
+        page.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        page.setPadding(dp(20), dp(12), dp(20), dp(12));
 
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = new TextView(this);
-        title.setText("日志");
-        title.setTextColor(TEXT);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setText(R.string.title_log);
+        title.setTextColor(colorTextPrimary);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setLineSpacing(0f, 1.3f);
         header.addView(title, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        header.addView(pill("导出", TEXT, CARD, v -> exportLog()));
-        header.addView(pill("复制", TEXT, CARD, v -> copyLog()));
-        header.addView(pill("清空", TEXT, CARD, v -> {
-            logText.setText("");
-            addLog("日志已清空");
-        }));
+        header.addView(toolPill(R.string.log_export, v -> exportLog()));
+        header.addView(spacerX(8));
+        header.addView(toolPill(R.string.log_copy, v -> copyLog()));
+        header.addView(spacerX(8));
+        header.addView(toolPill(R.string.log_clear, v -> confirmClearLog()));
         page.addView(header);
         page.addView(spacer(12));
 
+        logContainer = new FrameLayout(this);
+
         logText = new TextView(this);
-        logText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        logText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         logText.setTypeface(Typeface.MONOSPACE);
-        logText.setTextColor(0xFFD6D6D6);
+        logText.setTextColor(colorTextSecondary);
         logText.setTextIsSelectable(true);
-        ScrollView scroll = new ScrollView(this);
+        logText.setLineSpacing(0f, 1.4f);
+
+        logScroll = new ScrollView(this);
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(14), dp(14), dp(14), dp(14));
-        card.setBackground(cardBackground(CARD));
+        card.setBackgroundResource(R.drawable.bg_glass_log);
         card.addView(logText);
-        scroll.addView(card);
-        page.addView(scroll, new LinearLayout.LayoutParams(
+        logScroll.addView(card);
+
+        logScroll.setOnScrollChangeListener((v, sx, sy, osx, osy) -> {
+            int diff = (logText.getHeight() - logScroll.getHeight() - sy);
+            autoScroll = diff <= dp(40);
+            backToBottomBtn.setVisibility(autoScroll ? View.GONE : View.VISIBLE);
+        });
+
+        logContainer.addView(logScroll, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // 「回到底部」浮钮
+        backToBottomBtn = new TextView(this);
+        backToBottomBtn.setText(R.string.log_back_bottom);
+        backToBottomBtn.setTextColor(colorBg);
+        backToBottomBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        backToBottomBtn.setGravity(Gravity.CENTER);
+        backToBottomBtn.setPadding(dp(14), dp(8), dp(14), dp(8));
+        GradientDrawable fbBg = new GradientDrawable();
+        fbBg.setColor(0xCC2FD06B);
+        fbBg.setCornerRadius(dp(999));
+        backToBottomBtn.setBackground(fbBg);
+        backToBottomBtn.setOnClickListener(v -> scrollToBottom());
+        FrameLayout.LayoutParams fbLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        fbLp.bottomMargin = dp(12);
+        backToBottomBtn.setVisibility(View.GONE);
+        logContainer.addView(backToBottomBtn, fbLp);
+
+        page.addView(logContainer, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         return page;
+    }
+
+    private void scrollToBottom() {
+        logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+        autoScroll = true;
+        backToBottomBtn.setVisibility(View.GONE);
+    }
+
+    private void confirmClearLog() {
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.log_clear_title)
+                .setMessage(R.string.log_clear_msg)
+                .setPositiveButton(R.string.log_clear, (d, w) -> {
+                    logText.setText("");
+                    addLog(getString(R.string.log_clear_done));
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
     }
 
     private LinearLayout buildBottomBar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setBackgroundColor(0xFF141416);
+        bar.setBackgroundColor(0xD9FFFFFF);   // 亮色磨砂底，深色 Tab 文字可读
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        tabHome = tab("Home", v -> showTab(0));
-        tabLog = tab("Log", v -> showTab(1));
+        tabHome = tab(R.string.tab_home, v -> showTab(0));
+        tabLog = tab(R.string.tab_log, v -> showTab(1));
         bar.addView(tabHome, rowParams());
         bar.addView(tabLog, rowParams());
         return bar;
@@ -314,8 +684,8 @@ public class MainActivity extends Activity {
     private void showTab(int index) {
         homePage.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         logPage.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
-        tabHome.setTextColor(index == 0 ? GREEN : MUTED);
-        tabLog.setTextColor(index == 1 ? GREEN : MUTED);
+        tabHome.setTextColor(index == 0 ? colorGreen : colorTextWeak);
+        tabLog.setTextColor(index == 1 ? colorGreen : colorTextWeak);
     }
 
     // ------------------------------------------------------------ widgets
@@ -336,99 +706,40 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
     }
 
-    private GradientDrawable cardBackground(int color) {
-        GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(color);
-        drawable.setCornerRadius(dp(24));
-        if (color == GREEN_DARK) {
-            drawable.setGradientType(GradientDrawable.LINEAR_GRADIENT);
-            drawable.setOrientation(GradientDrawable.Orientation.LEFT_RIGHT);
-            drawable.setColors(new int[]{0xFF0F3A22, 0xFF1E7A46});
-        }
-        return drawable;
-    }
-
-    private TextView pill(String text, int color, int background, View.OnClickListener click) {
+    private TextView tab(int textRes, View.OnClickListener click) {
         TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextColor(color);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        view.setPadding(dp(14), dp(8), dp(14), dp(8));
-        view.setGravity(Gravity.CENTER);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(background);
-        bg.setCornerRadius(dp(18));
-        view.setBackground(bg);
-        view.setOnClickListener(click);
-        return view;
-    }
-
-    private TextView tab(String text, View.OnClickListener click) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextColor(MUTED);
+        view.setText(textRes);
+        view.setTextColor(colorTextWeak);
         view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         view.setGravity(Gravity.CENTER);
+        view.setMinHeight(dp(48));
         view.setOnClickListener(click);
         return view;
     }
 
-    private TextView bigButton(String text, int background, int color,
-                               View.OnClickListener click) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextColor(color);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
-        view.setTypeface(Typeface.DEFAULT_BOLD);
-        view.setGravity(Gravity.CENTER);
-        view.setPadding(dp(16), dp(16), dp(16), dp(16));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(background);
-        bg.setCornerRadius(dp(26));
-        view.setBackground(bg);
-        view.setOnClickListener(click);
-        return view;
-    }
-
-    private TextView smallHint(String text) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextColor(MUTED);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        view.setLineSpacing(dp(3), 1f);
-        return view;
-    }
-
-    private TextView addRow(LinearLayout parent, String label, String value,
-                            boolean divider) {
+    private TextView addRow(LinearLayout parent, int labelRes, String value) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(16), dp(12), dp(16), dp(12));
+        row.setPadding(0, dp(8), 0, dp(8));
 
-        LinearLayout texts = new LinearLayout(this);
-        texts.setOrientation(LinearLayout.VERTICAL);
         TextView name = new TextView(this);
-        name.setText(label);
-        name.setTextColor(TEXT);
+        name.setText(labelRes);
+        name.setTextColor(colorTextWeak);
         name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        name.setTypeface(Typeface.DEFAULT_BOLD);
+        name.setLineSpacing(0f, 1.5f);
+        row.addView(name, new LinearLayout.LayoutParams(dp(88),
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
         TextView val = new TextView(this);
         val.setText(value);
-        val.setTextColor(MUTED);
-        val.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        texts.addView(name);
-        texts.addView(spacer(2));
-        texts.addView(val);
-        row.addView(texts, new LinearLayout.LayoutParams(0,
+        val.setTextColor(colorTextSecondary);
+        val.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        val.setLineSpacing(0f, 1.5f);
+        row.addView(val, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
         parent.addView(row);
-        if (divider) {
-            View line = new View(this);
-            line.setBackgroundColor(LINE);
-            parent.addView(line, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 1));
-        }
         return val;
     }
 
@@ -437,6 +748,7 @@ public class MainActivity extends Activity {
     private void refreshDetails() {
         detailModel.setText(Build.MODEL + " / " + Build.PRODUCT);
         detailKernel.setText(System.getProperty("os.version", "?"));
+        detailKernelVer.setText(Build.VERSION.RELEASE);
         if (service != null) {
             new Thread(() -> {
                 try {
@@ -484,42 +796,127 @@ public class MainActivity extends Activity {
     }
 
     private void applyDetails() {
-        if (statusCard != null) {
-            statusCard.setBackground(cardBackground(
-                    rootOpen || "active".equals(ksu) ? GREEN_DARK : CARD));
-        }
+        boolean shizuku = safePing();
+        boolean authorized = shizuku && safePermission() == 0;
+
         detailKsud.setText("not loaded".equals(ksud) ? "未加载"
                 : ("missing".equals(ksud) ? "缺失" : ksud));
         detailKsu.setText("active".equals(ksu) ? "越狱模式（u:r:ksu:s0）" : "未启用");
         detailMgr.setText(describeManager());
         detailSelinux.setText(selinux);
         detailSeccomp.setText(seccomp);
-        boolean shizuku = safePing();
+        detailRootState.setText(rootOpen ? "uid=0 · 本次开机有效" : "未获取");
+
+        // ---- A 状态总览 ----
+        String summary = "内核 " + System.getProperty("os.version", "?")
+                + " · " + Build.MODEL;
         if ("active".equals(ksu)) {
-            statusTitle.setText("越狱模式");
-            statusSubtitle.setText("KernelSU 已加载 · su 为 u:r:ksu:s0 · 重启后失效");
-            statusBadge.setText("✓");
-            statusBadge.setTextColor(GREEN);
+            statusTitle.setText(R.string.status_rooted);
+            statusTitle.setTextColor(colorGreen);
+            statusSubtitle.setText("KernelSU 已加载 · su 为 u:r:ksu:s0");
+            summary += " · root 已获取 · 本次开机有效";
         } else if (rootOpen) {
-            statusTitle.setText("Root Shell");
+            statusTitle.setText(R.string.status_rooted);
+            statusTitle.setTextColor(colorGreen);
             statusSubtitle.setText("uid=0 · u:r:shell:s0 · 重启后失效");
-            statusBadge.setText("✓");
-            statusBadge.setTextColor(GREEN);
+            summary += " · root 已获取 · 本次开机有效";
         } else if (shizuku && bound) {
-            statusTitle.setText("就绪");
+            statusTitle.setText(R.string.status_ready);
+            statusTitle.setTextColor(colorGreen);
             statusSubtitle.setText("Shizuku 已连接 · 尚未提权");
-            statusBadge.setText("•");
-            statusBadge.setTextColor(MUTED);
+        } else if (shizuku) {
+            statusTitle.setText(R.string.status_connected);
+            statusTitle.setTextColor(colorAmber);
+            statusSubtitle.setText(authorized
+                    ? "Shizuku is running · connecting..."
+                    : "Shizuku is running · grant permission");
         } else {
-            statusTitle.setText("未连接");
-            statusSubtitle.setText(shizuku
-                    ? (safePermission() == 0
-                        ? "Shizuku is running · connecting..."
-                        : "Shizuku is running · grant permission")
-                    : "Start Shizuku first");
-            statusBadge.setText("?");
-            statusBadge.setTextColor(MUTED);
+            statusTitle.setText(R.string.status_disconnected);
+            statusTitle.setTextColor(colorTextSecondary);
+            statusSubtitle.setText("Start Shizuku first");
         }
+        statusSummary.setText(summary);
+
+        // ---- B 引导 4 步进度 ----
+        updateSteps(authorized, bound, rootOpen);
+
+        // ---- C 主操作区 ----
+        updateActions(authorized, bound, rootOpen);
+    }
+
+    /** 4 步进度：Shizuku → 准备 → 诊断 → 获取 root Shell。 */
+    private void updateSteps(boolean authorized, boolean bound, boolean rooted) {
+        // 状态位：第 0 步 = Shizuku 已授权；第 1 步 = 已连接(bound)；
+        // 第 2 步 = 已准备好（有 conf，粗略以 bound 为近似）；第 3 步 = root。
+        boolean[] done = {
+                authorized,
+                bound,
+                bound,
+                rooted
+        };
+        // 当前高亮：第一个未完成的步骤
+        int current = -1;
+        for (int i = 0; i < done.length; i++) {
+            if (!done[i]) {
+                current = i;
+                break;
+            }
+        }
+        for (int i = 0; i < stepDots.length; i++) {
+            if (done[i]) {
+                stepDots[i].setText("✓");
+                stepDots[i].setTextColor(colorGreen);
+                stepLabels[i].setTextColor(colorTextSecondary);
+            } else if (i == current) {
+                stepDots[i].setText("•");
+                stepDots[i].setTextColor(colorAmber);
+                stepLabels[i].setTextColor(colorTextPrimary);
+            } else {
+                stepDots[i].setText("•");
+                stepDots[i].setTextColor(colorTextWeak);
+                stepLabels[i].setTextColor(colorTextWeak);
+            }
+        }
+
+        // 未授权 → 显示琥珀提示条
+        if (!authorized) {
+            guideBanner.setVisibility(View.VISIBLE);
+            bannerText.setText(safePing()
+                    ? "Shizuku 正在运行，但尚未授权本应用"
+                    : "Shizuku 未运行，请先启动并授权");
+        } else {
+            guideBanner.setVisibility(View.GONE);
+        }
+    }
+
+    private void updateActions(boolean authorized, boolean bound, boolean rooted) {
+        // 获取 root Shell：需 Shizuku 已授权 + 已连接
+        boolean canRoot = authorized && bound;
+        actionRootBtn.setEnabled(canRoot);
+        actionRootBtn.setAlpha(canRoot ? 1f : 0.45f);
+        actionRootHint.setText(rooted
+                ? "已获取 root Shell（本次开机有效）"
+                : (canRoot ? "运行 CVE-2026-98260，保持 uid=0 shell"
+                : missingStep(authorized, bound)));
+
+        // 加载 KernelSU：需 root 已获取
+        boolean canKsu = rooted;
+        actionKsuBtn.setEnabled(canKsu);
+        actionKsuBtn.setAlpha(canKsu ? 1f : 0.45f);
+        actionKsuHint.setText("active".equals(ksu)
+                ? "KernelSU 已加载（u:r:ksu:s0）"
+                : (canKsu ? "用伪造 cred 走一次 ksud late-load"
+                : rooted ? "" : "需先获取 root Shell"));
+    }
+
+    private String missingStep(boolean authorized, boolean bound) {
+        if (!authorized) {
+            return "需先授权 Shizuku";
+        }
+        if (!bound) {
+            return "需先连接用户服务";
+        }
+        return "";
     }
 
     private boolean safePing() {
@@ -631,7 +1028,14 @@ public class MainActivity extends Activity {
                 String rel = m.find() ? m.group(1) : "derived";
                 String res = service.importConf(rel + ".conf", text);
                 addLog("推导完成（release=" + rel + "）\n" + res);
-                ui.post(() -> toast("已生成并导入：" + rel));
+                ui.post(() -> {
+                    toast("已生成并导入：" + rel);
+                    if (!res.startsWith("导入失败")) {
+                        // 新 conf 已落地，自动重跑一次准备，换掉 /data/local/tmp/timer.conf
+                        autoPrepared = false;
+                        maybeAutoPrepare();
+                    }
+                });
             } catch (ClassNotFoundException e) {
                 addLog("此构建没有内置推导（编译时未找到 kotlinc）；"
                         + "请用 PC 的 cve98260_auto.py 生成后再点「导入配置」");
@@ -662,6 +1066,19 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == REQUEST_CODE) {
+            // 有的 Shizuku 版本授权后仍回 RESULT_CANCELED，以实际权限位为准
+            if (result == RESULT_OK
+                    || safePermission() == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                addLog("Shizuku 授权成功，接着自动准备");
+                bindService();
+            } else {
+                addLog("Shizuku 授权被拒绝 —— 没有权限就建不了工作目录");
+                toast("需要 Shizuku 授权才能继续");
+                refreshDetails();
+            }
+            return;
+        }
         if ((request != REQ_CONF && request != REQ_IMG) || result != RESULT_OK
                 || data == null || data.getData() == null) {
             return;
@@ -705,7 +1122,13 @@ public class MainActivity extends Activity {
                 String text = new String(bos.toByteArray(), "UTF-8");
                 String r = service.importConf(fileName, text);
                 addLog(r);
-                ui.post(() -> toast(r.split("\n")[0]));
+                ui.post(() -> {
+                    toast(r.split("\n")[0]);
+                    if (!r.startsWith("导入失败")) {
+                        autoPrepared = false;
+                        maybeAutoPrepare();
+                    }
+                });
             } catch (Throwable t) {
                 addLog("导入失败：" + t);
             }
@@ -873,36 +1296,81 @@ public class MainActivity extends Activity {
     }
 
     private void prepare() {
+        prepareInternal(false);
+    }
+
+    /** 自动或手动执行准备阶段；auto=true 时不弹 toast 打断。 */
+    private void prepareInternal(boolean auto) {
+        if (preparing) {
+            addLog("准备正在进行，忽略这次触发");
+            return;
+        }
         if (!safePing()) {
-            new AlertDialog.Builder(this)
-                    .setTitle("Shizuku 未运行")
-                    .setMessage("请先启动 Shizuku：\n\n"
-                            + "1. 打开 Shizuku 应用\n"
-                            + "2. 用「无线调试」启动（或通过 USB 配对启动）\n"
-                            + "3. 回到这里再点一次「准备」")
-                    .setPositiveButton("确定", null)
-                    .show();
+            if (!auto) {
+                new AlertDialog.Builder(this)
+                        .setTitle("Shizuku 未运行")
+                        .setMessage("请先启动 Shizuku：\n\n"
+                                + "1. 打开 Shizuku 应用\n"
+                                + "2. 用「无线调试」启动（或通过 USB 配对启动）\n"
+                                + "3. 回到这里，授权后会自动准备")
+                        .setPositiveButton("确定", null)
+                        .show();
+            }
             return;
         }
         if (service == null) {
             bindService();
-            toast("正在连接 Shizuku…");
+            if (!auto) {
+                toast("正在连接 Shizuku…");
+            }
             return;
         }
-        toast("正在准备…");
+        preparing = true;
+        addLog(auto ? "已获得 Shizuku 授权，自动执行准备" : "手动准备…");
+        if (!auto) {
+            toast("正在准备…");
+        }
         new Thread(() -> {
             try {
                 final String result = service.install(getPackageCodePath());
                 addLog(result);
                 ui.post(() -> {
-                    toast(result);
+                    preparing = false;
+                    autoPrepared = true;
+                    if (!auto) {
+                        toast(result);
+                    } else if (result.startsWith("安装失败") || result.contains("conf=none")) {
+                        toast("准备未完成，请看日志");
+                    }
                     refreshDetails();
                 });
             } catch (Throwable t) {
                 addLog("准备失败：" + t);
-                ui.post(() -> toast("准备失败：" + t));
+                ui.post(() -> {
+                    preparing = false;
+                    autoPrepared = true;
+                    toast("准备失败：" + t);
+                });
             }
         }).start();
+    }
+
+    /**
+     * Shizuku 授权 + 用户服务连上之后自动跑一次准备。
+     *
+     * 只在本次进程里跑一次：失败也置位。install() 里含 am kill-all，每次都跑
+     * 会把用户后台反复清掉，所以宁可让用户手动补一次，也不做无条件重试。
+     */
+    private void maybeAutoPrepare() {
+        if (autoPrepared || preparing) {
+            return;
+        }
+        if (!safePing()
+                || safePermission() != android.content.pm.PackageManager.PERMISSION_GRANTED
+                || service == null) {
+            return;
+        }
+        prepareInternal(true);
     }
 
     private void toast(String text) {
@@ -1065,10 +1533,9 @@ public class MainActivity extends Activity {
                                 : "KernelSU 已加载，但 su 还没通过验证，看日志");
                         refreshDetails();
                     } else {
-                        statusTitle.setText("KernelSU 失败");
+                        statusTitle.setText(R.string.status_failed);
+                        statusTitle.setTextColor(colorRed);
                         statusSubtitle.setText(reason + " - reboot, then retry");
-                        statusBadge.setText("!");
-                        statusBadge.setTextColor(RED);
                         toast("KernelSU 失败：" + reason);
                         addLog("KernelSU 失败：" + reason
                                 + " - parked processes remain; reboot to clean up");
@@ -1211,6 +1678,9 @@ public class MainActivity extends Activity {
         ui.post(() -> {
             if (logText != null) {
                 logText.append(sb.toString());
+                if (autoScroll) {
+                    logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+                }
             }
         });
     }

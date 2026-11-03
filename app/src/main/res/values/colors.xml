@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 液态玻璃 · 基础（背景为风景照，此色仅作强调色上的深色文字） -->
+    <color name="bg">#0B0B0E</color>
+
+    <!-- 玻璃卡片（亮背景：白色玻璃加浓保证可读，API 30 无模糊再提一档） -->
+    <color name="glass_card">#C2FFFFFF</color>
+    <color name="glass_pill">#A8FFFFFF</color>
+    <color name="glass_pressed">#E5FFFFFF</color>
+    <color name="glass_log">#B3FFFFFF</color>
+
+    <!-- 描边（白玻璃上用更亮的白） -->
+    <color name="stroke">#66FFFFFF</color>
+    <color name="stroke_strong">#99FFFFFF</color>
+
+    <!-- 顶部内高光 -->
+    <color name="highlight_top">#80FFFFFF</color>
+
+    <!-- 文本（亮玻璃上改深色） -->
+    <color name="text_primary">#1A1A1E</color>
+    <color name="text_secondary">#4A4A52</color>
+    <color name="text_weak">#84848E</color>
+    <color name="text_on_emphasis">#0B0B0E</color>
+
+    <!-- 状态色（白玻璃上加深一档保证对比） -->
+    <color name="state_green">#1FA84E</color>
+    <color name="state_red">#E03434</color>
+    <color name="state_amber">#C97F00</color>
+
+    <!-- 主操作绿渐变 -->
+    <color name="primary_grad_start">#3FE07A</color>
+    <color name="primary_grad_end">#1FB85C</color>
+    <color name="primary_pressed">#1FA858</color>
+
+    <!-- 停止按钮纯红 -->
+    <color name="danger">#FF5A5A</color>
+    <color name="danger_pressed">#E04444</color>
+</resources>

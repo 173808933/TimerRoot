@@ -25,7 +25,7 @@ import java.util.zip.ZipFile;
 public class UserService extends IUserService.Stub {
 
     /** 服务端版本标记：用来判断当前跑的 UserService 是不是新装的那份。 */
-    private static final String BUILD = "0.59";
+    private static final String BUILD = "0.60";
     private static final String PKG = "com.kpgc.timerroot";
     private static final String BIN = "/data/local/tmp/timer";
     private static final String CONF = "/data/local/tmp/timer.conf";
@@ -462,7 +462,7 @@ public class UserService extends IUserService.Stub {
             boolean match = rel.equals(uname);
             return "已导入 " + out.getAbsolutePath() + "（" + out.length() + " 字节）\n"
                     + "  release = " + rel + "\n"
-                    + (match ? "  与本机一致，下次「准备」就会用它"
+                    + (match ? "  与本机一致，会自动用于准备"
                              : "  注意：本机是 " + uname + "，不匹配，不会被使用");
         } catch (Throwable t) {
             return "导入失败：" + t;

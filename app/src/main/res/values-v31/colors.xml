@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- API 31+：真实背景模糊，玻璃可以透一些（亮风景照背景） -->
+    <color name="glass_card">#99FFFFFF</color>
+    <color name="glass_pill">#80FFFFFF</color>
+    <color name="glass_pressed">#CCFFFFFF</color>
+    <color name="glass_log">#8CFFFFFF</color>
+</resources>

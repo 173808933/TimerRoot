@@ -187,6 +187,15 @@ if ((Test-Path $ktSrc) -and $NoKotlin) {
     }
 }
 
+# resources + manifest (must run BEFORE javac so aapt2 link generates R.java into $gen)
+$resZip = Join-Path $work 'res.zip'
+$base = Join-Path $work 'base.apk'
+& $aapt2 compile --dir (Join-Path $root 'app/src/main/res') -o $resZip
+& $aapt2 link -o $base -I $androidJar --manifest (Join-Path $root 'app/src/main/AndroidManifest.xml') `
+    -A (Join-Path $root 'app/src/main/assets') --min-sdk-version 30 --target-sdk-version 36 `
+    --version-code $VersionCode --version-name $VersionName --java ($gen -replace '\\', '/') $resZip
+if ($LASTEXITCODE -ne 0) { throw "aapt2 failed" }
+
 # javac
 $sources = Get-ChildItem $src, $gen, (Join-Path $work 'stubs') -Recurse -Filter '*.java' |
     ForEach-Object { $_.FullName -replace '\\', '/' }
@@ -208,15 +217,6 @@ $d8Inputs = @("--lib", $androidJar, "--min-api", "30",
 if ($kotlinStdlib) { $d8Inputs += $kotlinStdlib }   # 运行期要 stdlib，直接打进 dex
 & $d8 @d8Inputs
 if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
-
-# resources + manifest
-$resZip = Join-Path $work 'res.zip'
-$base = Join-Path $work 'base.apk'
-& $aapt2 compile --dir (Join-Path $root 'app/src/main/res') -o $resZip
-& $aapt2 link -o $base -I $androidJar --manifest (Join-Path $root 'app/src/main/AndroidManifest.xml') `
-    -A (Join-Path $root 'app/src/main/assets') --min-sdk-version 30 --target-sdk-version 36 `
-    --version-code $VersionCode --version-name $VersionName $resZip
-if ($LASTEXITCODE -ne 0) { throw "aapt2 failed" }
 
 # dex + align + sign
 $unsigned = Join-Path $work 'unsigned.apk'

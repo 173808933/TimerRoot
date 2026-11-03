@@ -1,4 +1,69 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <resources>
     <string name="app_name">TimerRoot Neo7</string>
+
+    <!-- 标题 -->
+    <string name="title_home">TimerRoot Neo7</string>
+    <string name="title_log">日志</string>
+
+    <!-- 状态总览 -->
+    <string name="status_disconnected">未连接</string>
+    <string name="status_connected">已连接 Shizuku</string>
+    <string name="status_ready">已就绪</string>
+    <string name="status_rooted">已越狱 (root)</string>
+    <string name="status_failed">失败 (需重启)</string>
+
+    <!-- 引导/依赖 -->
+    <string name="guide_title">引导</string>
+    <string name="step_shizuku">Shizuku</string>
+    <string name="step_prepare">准备</string>
+    <string name="step_diagnose">诊断</string>
+    <string name="step_root">获取 root Shell</string>
+    <string name="grant_shizuku">去授权 Shizuku</string>
+
+    <!-- 主操作 -->
+    <string name="action_root">获取 root Shell</string>
+    <string name="action_ksu">加载 KernelSU</string>
+    <string name="action_stop">停止</string>
+
+    <!-- 设备详情 -->
+    <string name="detail_title">设备详情</string>
+    <string name="detail_model">机型</string>
+    <string name="detail_kernel">内核</string>
+    <string name="detail_kernel_ver">内核版本</string>
+    <string name="detail_ksud">ksud 路径</string>
+    <string name="detail_ksu">KernelSU</string>
+    <string name="detail_selinux">SELinux</string>
+    <string name="detail_seccomp">Seccomp</string>
+    <string name="detail_root">root 状态</string>
+    <string name="detail_manager">管理器</string>
+
+    <!-- 工具 -->
+    <string name="tool_config">配置</string>
+    <string name="tool_diagnose">诊断</string>
+    <string name="tool_log">日志</string>
+    <string name="tool_import">导入配置</string>
+    <string name="tool_derive">推导配置</string>
+    <string name="tool_prepare">准备</string>
+    <string name="tool_diag">诊断</string>
+    <string name="tool_selfcheck">自检</string>
+    <string name="tool_lastlog">上次日志</string>
+    <string name="tool_rootcmd">root 命令</string>
+    <string name="tool_shizuku">Shizuku</string>
+
+    <!-- Tab -->
+    <string name="tab_home">Home</string>
+    <string name="tab_log">Log</string>
+
+    <!-- 日志操作 -->
+    <string name="log_export">导出</string>
+    <string name="log_copy">复制</string>
+    <string name="log_clear">清空</string>
+    <string name="log_clear_title">清空日志？</string>
+    <string name="log_clear_msg">日志内容将被清空，此操作不可撤销。</string>
+    <string name="log_clear_done">日志已清空</string>
+    <string name="log_back_bottom">↓回到底部</string>
+
+    <!-- 风险提示 -->
+    <string name="risk_hint">成功仅本次开机有效 · 失败需重启设备</string>
 </resources>

@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+
+    <!-- 液态玻璃闪电：真正的之字折线造型 + 光影渐变 -->
+
+    <!-- 1. 玻璃主体（闪电折线，右上尖劈向左下尖，带光影渐变） -->
+    <path android:pathData="M58,16 L34,54 L50,54 L42,96 L74,50 L60,50 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="34" android:startY="16"
+                android:endX="74" android:endY="96"
+                android:startColor="#FFF4FBFF"
+                android:centerColor="#D6E4EEF5"
+                android:endColor="#8CA0B0BE" />
+        </aapt:attr>
+    </path>
+
+    <!-- 2. 玻璃描边（细亮边） -->
+    <path
+        android:pathData="M58,16 L34,54 L50,54 L42,96 L74,50 L60,50 Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.2"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
+
+    <!-- 3. 顶部受光高光（沿右上尖→左折的受光边） -->
+    <path
+        android:pathData="M58,16 L34,54 L50,54"
+        android:strokeColor="#CCFFFFFF"
+        android:strokeWidth="2.4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
+
+    <!-- 4. 底部反光（底尖附近暖白反光） -->
+    <path
+        android:pathData="M42,96 L38,82 L46,82 Z"
+        android:fillColor="#66FFFFFF" />
+
+    <!-- 5. 能量芯（绿色，略缩的闪电折线） -->
+    <path android:pathData="M54,26 L40,54 L50,54 L46,86 L66,52 L57,52 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="40" android:startY="26"
+                android:endX="66" android:endY="86"
+                android:startColor="#FF9FFFC4"
+                android:centerColor="#FF3FD97C"
+                android:endColor="#FF1FA858" />
+        </aapt:attr>
+    </path>
+
+    <!-- 6. 芯内最亮核心 -->
+    <path
+        android:pathData="M52,36 L44,54 L50,54 L48,76 L59,52 L53,52 Z"
+        android:fillColor="#FFE4FFF0" />
+</vector>
