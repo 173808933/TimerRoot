@@ -3,7 +3,7 @@ native/timer.c — conf 驱动的 exploit
 
 这份源码是 APK 里 `assets/timer` 的来源。它不是上游 `kpgc10kai/TimerRoot` 那份
 写死 6.12.69 的二进制，而是 **`rikumi/TimerRoot` 的 conf 驱动版本**，
-再叠加了本 fork 为 6.1（Neo7）做的修改。
+再叠加了本 fork 为 6.1 做的修改。
 
     rikumi/TimerRoot native/timer.c  (PKT110, 6.6.118)
       └─ 本 fork: 6.1 布局 + rb_node 形状 + probe/panic_on_warn 顺序

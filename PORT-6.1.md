@@ -1,8 +1,11 @@
-# TimerRoot — Neo7 / 6.1 fork
+# TimerRoot — Linux 6.1 (android14-6.1) port
 
 本 fork 在 [kpgc10kai/TimerRoot](https://github.com/kpgc10kai/TimerRoot) 的基础上，
-把「写死 6.12.69」换成了 **conf 驱动 + 6.1 适配**，并在一台 realme Neo7 上
-把 KernelSU 路线完整跑通。
+把「写死 6.12.69」换成了 **conf 驱动 + 6.1 适配**。
+
+二进制不认识机型：`native/timer.c` 里没有任何按型号分支的代码，每条内核常量
+（`timer_site` / `task_cred_off` / `copy_process_low21` / `cred_uid_off` …）都来自
+`--conf`。所以**加一个机型 = 加一份 conf 文件**，不需要改代码、不需要重编二进制。
 
 上游是 app 外壳（Shizuku + AIDL + UI），二进制本身来自
 [rikumi/TimerRoot](https://github.com/rikumi/TimerRoot) 的 conf 驱动版本。
@@ -13,14 +16,13 @@
 | release | 机型 | 状态 |
 |---|---|---|
 | `6.1.157-android14-11-o-ga43993466696` | realme Neo7 | 实机跑通（shell + KernelSU） |
-| `6.1.141-android14-11-o-g7598c3221214` | realme GT6 | conf 已推导并与旧 profile 交叉核对，尚未上机 |
+| `6.1.141-android14-11-o-g7598c3221214` | realme GT6 | conf 已推导并交叉核对，尚未上机 |
+| `6.1.141-android14-11-o-gffc54a6d2287` | OPPO K12s | 实机跑通（OTA 链接推导 → 提权 → KSU） |
 
-一个 APK 同时带两份 conf，安装时按 `uname -r` **精确匹配**选一份；匹配不上就
+一个 APK 同时带三份 conf，安装时按 `uname -r` **精确匹配**选一份；匹配不上就
 拒绝启动（不会拿别的内核偏移去写内存）。加机型就是往 `assets/conf/` 里放一份新的。
 
-## 实测状态
-
-设备：realme Neo7（ossi），`6.1.157-android14-11-o-ga43993466696`，SELinux Enforcing。
+## 验证记录（android14-6.1 / 6.1.157，SELinux Enforcing）
 
 | 路线 | 结果 |
 |---|---|
@@ -156,7 +158,7 @@ App 里有两条路，都不需要重新打包：
 
 两者最终都写进 `/data/local/tmp/conf.d/`，下次「准备」优先于内置的 `assets/conf/`；
 都会校验 `release` 是否等于本机 `uname -r`，并明确告诉你「与本机一致」还是
-「不匹配（本机是 …）」。设备端推导的结果与 PC 版逐项对拍过（Neo7 / GT6 各 20 个字段全同）。
+「不匹配（本机是 …）」。设备端推导的结果与 PC 版逐项对拍过（多台真机各 20 个字段全同）。
 
 必要条件：漏洞未修补（没有 `posixtimer_exec`）、shell 域能写 tracefs、
 4 KiB 页。KSU 路线额外要求内核允许加载模块（`CONFIG_MODULES=y`、

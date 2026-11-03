@@ -1,6 +1,6 @@
 # Clones the upstream exploit and drops the prebuilt binary into assets/.
 #
-# NOTE (this fork): assets/timer is the conf-driven Neo7 build compiled from
+# NOTE (this fork): assets/timer is the conf-driven 6.1 build compiled from
 # native/timer.c. The binary this script downloads is hardcoded for 6.12.69 and
 # cannot read a --conf profile, so running it here would silently break the app
 # on 6.1. Refuses unless -Force is passed.

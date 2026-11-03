@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <resources>
-    <string name="app_name">TimerRoot Neo7</string>
+    <string name="app_name">TimerRoot</string>
 
     <!-- 标题 -->
-    <string name="title_home">TimerRoot Neo7</string>
+    <string name="title_home">TimerRoot</string>
     <string name="title_log">日志</string>
 
     <!-- 状态总览 -->

@@ -10,8 +10,8 @@ android {
         applicationId 'com.kpgc.timerroot'
         minSdk 30
         targetSdk 36
-        versionCode 65
-        versionName '0.64-onetap'
+        versionCode 66
+        versionName '0.65'
     }
 
     buildTypes {

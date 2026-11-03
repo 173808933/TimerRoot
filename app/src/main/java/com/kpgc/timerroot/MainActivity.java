@@ -80,10 +80,10 @@ public class MainActivity extends Activity {
     private TextView bannerText;
 
     // ---- 主操作区 (C) ----
-    private TextView actionRootBtn;
-    private TextView actionRootHint;
-    private TextView actionKsuBtn;
-    private TextView actionKsuHint;
+    private TextView actionShellOnlyBtn;
+    private TextView actionShellOnlyHint;
+    private TextView actionOneTapBtn;
+    private TextView actionOneTapHint;
     private TextView actionStopBtn;
 
     // ---- 设备详情卡 (D) ----
@@ -393,17 +393,17 @@ public class MainActivity extends Activity {
         card.setBackgroundResource(R.drawable.bg_glass_card);
 
         // 主路径：一次跑完 提权 + KernelSU（fake cred 那条本来就自带 rootd）
-        actionKsuBtn = actionButton(R.string.action_ksu, true, v -> confirmKsu());
-        card.addView(actionKsuBtn);
-        actionKsuHint = actionHint(R.string.action_ksu);
-        card.addView(actionKsuHint);
+        actionOneTapBtn = actionButton(R.string.action_ksu, true, v -> confirmOneTap());
+        card.addView(actionOneTapBtn);
+        actionOneTapHint = actionHint(R.string.action_ksu);
+        card.addView(actionOneTapHint);
         card.addView(spacer(10));
 
         // 备选：只要一个 uid=0 的 shell，不碰 KernelSU（调试/排障用）
-        actionRootBtn = secondaryButton(R.string.action_root, v -> confirmRoot());
-        card.addView(actionRootBtn);
-        actionRootHint = actionHint(R.string.action_root);
-        card.addView(actionRootHint);
+        actionShellOnlyBtn = secondaryButton(R.string.action_root, v -> confirmShellOnly());
+        card.addView(actionShellOnlyBtn);
+        actionShellOnlyHint = actionHint(R.string.action_root);
+        card.addView(actionShellOnlyHint);
         card.addView(spacer(12));
 
         // 停止
@@ -910,16 +910,16 @@ public class MainActivity extends Activity {
         // 一键流程不再依赖"先拿到 root shell"：fake 那条自己会提权。
         boolean canRun = authorized && bound;
 
-        actionKsuBtn.setEnabled(canRun);
-        actionKsuBtn.setAlpha(canRun ? 1f : 0.45f);
-        actionKsuHint.setText("active".equals(ksu)
+        actionOneTapBtn.setEnabled(canRun);
+        actionOneTapBtn.setAlpha(canRun ? 1f : 0.45f);
+        actionOneTapHint.setText("active".equals(ksu)
                 ? "已加载（u:r:ksu:s0）· 再点一次只复验 su，不重跑漏洞"
                 : (canRun ? "一次跑完：提权 + ksud late-load，约 15 秒"
                 : missingStep(authorized, bound)));
 
-        actionRootBtn.setEnabled(canRun);
-        actionRootBtn.setAlpha(canRun ? 1f : 0.45f);
-        actionRootHint.setText(rooted
+        actionShellOnlyBtn.setEnabled(canRun);
+        actionShellOnlyBtn.setAlpha(canRun ? 1f : 0.45f);
+        actionShellOnlyHint.setText(rooted
                 ? "已获取 root Shell（本次开机有效）"
                 : (canRun ? "只提权，不加载 KernelSU（排障用）"
                 : missingStep(authorized, bound)));
@@ -1008,7 +1008,7 @@ public class MainActivity extends Activity {
      *
      * 解析跑在 [com.kpgc.timerroot.ota.Deriver] 里（Kotlin，反射调用）：
      * carve → kallsyms → 反汇编 call site → BTF。推导结果和 PC 版
-     * cve98260_auto.py 的 20 个字段逐项一致（Neo7 / GT6 都对拍过）。
+     * cve98260_auto.py 的 20 个字段逐项一致（多台 6.1 真机都对拍过）。
      */
     private void pickImage() {
         if (service == null) {
@@ -1481,19 +1481,19 @@ public class MainActivity extends Activity {
         Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
     }
 
-    private void confirmRoot() {
+    private void confirmShellOnly() {
         new AlertDialog.Builder(this)
                 .setTitle("获取 root Shell？")
                 .setMessage("运行一次 CVE-2026-98260，并保持一个 uid=0 的 shell。\n\n"
                         + "- 失败时进程会挂起（park），只有重启能清理\n"
                         + "- 重启后 root 消失\n"
                         + "- 运行期间不要操作设备")
-                .setPositiveButton("运行", (d, w) -> runRoot())
+                .setPositiveButton("运行", (d, w) -> runShellOnly())
                 .setNegativeButton("取消", null)
                 .show();
     }
 
-    private void runRoot() {
+    private void runShellOnly() {
         if (service == null) {
             addLog("请先绑定服务");
             return;
@@ -1527,7 +1527,7 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    private void confirmKsu() {
+    private void confirmOneTap() {
         /*
          * 已经加载过就不要再跑一遍漏洞：fake cred 那次会把父进程 park 住，
          * 再跑只会多留一个僵尸，还得重启。这里改成"复验 su" —— 开机内随时能点。
@@ -1544,12 +1544,12 @@ public class MainActivity extends Activity {
                         + "- 父进程会挂起（park），用完重启清理\n"
                         + "- 运行期间不要操作设备\n\n"
                         + "不必先点「只获取 root Shell」，那条是排障用的备选路径。")
-                .setPositiveButton("开始", (d, w) -> runKsu())
+                .setPositiveButton("开始", (d, w) -> runOneTap())
                 .setNegativeButton("取消", null)
                 .show();
     }
 
-    private long ksuStartedAt;
+    private long oneTapStartedAt;
 
     /** 单独复验 su，不碰内核 —— 已加载后想再确认一次时用。 */
     private void verifySu() {
@@ -1569,7 +1569,7 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    private void runKsu() {
+    private void runOneTap() {
         if (service == null) {
             addLog("请先绑定服务");
             return;
@@ -1579,11 +1579,11 @@ public class MainActivity extends Activity {
          * 重复点击会让两个 glk 进程各自 park，白白浪费一次开机。
          * 两分钟内直接忽略。
          */
-        if (System.currentTimeMillis() - ksuStartedAt < 120_000L) {
+        if (System.currentTimeMillis() - oneTapStartedAt < 120_000L) {
             addLog("KernelSU 流程刚跑过，忽略这次点击（失败请先重启）");
             return;
         }
-        ksuStartedAt = System.currentTimeMillis();
+        oneTapStartedAt = System.currentTimeMillis();
         new Thread(() -> {
             try {
                 // The fake stage re-execs the binary from /data/local/tmp; if

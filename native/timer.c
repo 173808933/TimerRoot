@@ -1,8 +1,12 @@
 /*
  * ---------------------------------------------------------------------------
- * Neo7 / 6.1 port (this fork)
+ * Linux 6.1 (android14-6.1 GKI) port - this fork
  *
  *   base    : rikumi/TimerRoot native/timer.c (conf driven, MIT)
+ *   layout  : every device-specific number lives in --conf (timer_site,
+ *             task_cred_off, copy_process_low21, cred_uid_off, ...).
+ *             Nothing below branches on the model: supporting a new device
+ *             means adding a conf file, not touching this file.
  *   added   : - 6.1 cred layout branch: cred_uid_off == 4 means usage is 4
  *               bytes, so the fake cred is built with the 0xa0 layout instead
  *               of 0xb8 (6.6/6.12).
@@ -26,12 +30,15 @@
  *             - ksud/libksud.so is located through `pm list packages -f`
  *               because /data/app is 0771 for the shell user.
  *
- *   tested  : realme Neo7, 6.1.157-android14-11-o-ga43993466696 (2026-11-02)
- *             one tap: 4/4 plants first try, KSU_LOADED, su in u:r:ksu:s0
+ *   tested  : android14-6.1 GKI builds (Android 14 OEM ROMs), releases
+ *             6.1.141 and 6.1.157; 4/4 plants on the first try, KSU_LOADED,
+ *             su in u:r:ksu:s0. Per-device notes: PORT-6.1.md
  * ---------------------------------------------------------------------------
  */
 /*
  * CVE-2026-98260 - posix cpu timers: uid-0 shell + KernelSU late-load
+ *
+ * Upstream head, kept for provenance:
  * Target : OPPO Find X8s PKT110, Android 16 (ColorOS 17)
  * Kernel : 6.6.118-android15-8-g9bc34d5b0c79-abogki537459655-4k
  * SELinux: Enforcing
