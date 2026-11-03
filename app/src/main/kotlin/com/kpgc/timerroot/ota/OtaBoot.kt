@@ -1,11 +1,13 @@
 package com.kpgc.timerroot.ota
 
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.util.Locale
 import java.util.function.Consumer
 import kotlin.math.min
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 
 /**
  * 从 OTA 链接里只把 boot 分区拉下来，产出可以直接喂给 [Deriver] 的 boot.img。
@@ -21,7 +23,7 @@ import kotlin.math.min
  * 移植自 GhostLock 的 OtaPayloadExtractor，做了三处简化：
  *   - 去掉了协程（调用方本来就在后台线程，阻塞即可）
  *   - 只取 boot，不再顺带 xbl_config（推导只需要内核）
- *   - 不支持 REPLACE_BZ（需要 commons-compress）；遇到就明确报错
+ *   - REPLACE_BZ 用 commons-compress 解（app/libs 里那个 jar，1.1 MB）
  */
 object OtaBoot {
 
@@ -112,9 +114,18 @@ object OtaBoot {
                             writeExtents(raf, plain, op.destExtents, blockSize)
                         }
 
-                        PayloadBinUtils.OP_REPLACE_BZ ->
-                            return "ERR: 该 OTA 的 boot 用了 BZ 压缩，当前版本不支持；" +
-                                    "请改用本地 boot.img 或换一个 OTA 包"
+                        PayloadBinUtils.OP_REPLACE_BZ -> {
+                            if (op.dataLength > MAX_OP_BYTES) {
+                                return "ERR: BZ op 长度异常（" + op.dataLength + "），疑似解析错位"
+                            }
+                            val compressed = reader.read(
+                                url, dataBase + op.dataOffset, op.dataLength.toInt()
+                            ) ?: return "ERR: 下载 BZ 数据失败"
+                            val plain = BZip2CompressorInputStream(
+                                ByteArrayInputStream(compressed)
+                            ).use { it.readBytes() }
+                            writeExtents(raf, plain, op.destExtents, blockSize)
+                        }
 
                         else -> return "ERR: 不支持的 payload 操作类型 " + op.type
                     }

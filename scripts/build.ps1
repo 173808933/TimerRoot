@@ -177,7 +177,10 @@ if ((Test-Path $ktSrc) -and $NoKotlin) {
         $javaExe = Join-Path (Split-Path (Get-Command javac).Source -Parent) 'java.exe'
         $compilerCp = (@($kcJar, $kotlinStdlib, $coroutines, $trove, $anno) |
             Where-Object { $_ }) -join ';'
-        $refCp = (@($kotlinStdlib, $anno) | Where-Object { $_ }) -join ';'
+        # app/libs 下的 jar 既是编译期依赖，也要打进 dex
+        $libJars = @(Get-ChildItem (Join-Path $root 'app/libs') -Filter '*.jar' -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.FullName })
+        $refCp = (@($kotlinStdlib, $anno) + $libJars | Where-Object { $_ }) -join ';'
         New-Item -ItemType Directory -Force -Path $kclasses | Out-Null
         Write-Host "kotlinc: $([System.IO.Path]::GetFileName($kcJar))"
         & $javaExe -cp $compilerCp org.jetbrains.kotlin.cli.jvm.K2JVMCompiler `
@@ -215,6 +218,7 @@ $classFiles | Set-Content $classArg -Encoding ascii
 $d8Inputs = @("--lib", $androidJar, "--min-api", "30",
     "--output", ($dex -replace '\\', '/'), "@$classArg")
 if ($kotlinStdlib) { $d8Inputs += $kotlinStdlib }   # 运行期要 stdlib，直接打进 dex
+foreach ($j in $libJars) { $d8Inputs += $j }       # commons-compress 等运行期依赖
 & $d8 @d8Inputs
 if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
 
