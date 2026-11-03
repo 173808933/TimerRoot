@@ -210,35 +210,50 @@ the server is **not** running; the exploit cannot start until it is.
 3. The card turns **Ready** (Shizuku connected, no root yet). If it still says
    `Not connected`, press `Shizuku` in the tools row to request again.
 
-### 3. Prepare
+### 3. Prepare (automatic)
 
-`Prepare` extracts `assets/timer` to `/data/local/tmp/timer`:
+Nothing to press. As soon as Shizuku grants access the app extracts
+`assets/timer` to `/data/local/tmp/timer`, picks the conf whose `release`
+matches `uname -r` exactly, locates `ksud`, and runs `am kill-all; sync`.
+The `准备` pill in Tools only repeats it.
+
+If the card says `conf=none`, this build has no profile for that kernel: import
+one, or derive it from the OTA link (see above).
+
+### 4. One tap: root + KernelSU
+
+Press **一键 root + KernelSU**. A single exploit run does the whole job:
 
 ```
-installed 307192 bytes
-```
-
-### 4. Get root shell
-
-One tap. The app escalates, keeps a `uid=0` shell inside the service, and then
-starts the KernelSU late-load automatically:
-
-```
-[child] woke uid=0
-root shell ready - loading KernelSU...
-Loading KernelSU... 12s
+[+] slide=0x1988600000 (probe)
+[+] panic_on_warn zero-written (value unreadable)
+[+] fake cred armed: task=... cred=... mode=fake
+[+] selinux after write: enforce=0
+[fake] worker setresgid=0 setresuid=0 uid=0 euid=0
+[rootd] listening /data/local/tmp/rootd.sock uid=0 euid=0
+[ksu] try: late-load --kmi android14-6.1 --allow-shell --package-name ...
+[ksu] rc=0
 KSU_LOADED
+—— 验证 su ——
+module: kernelsu ...
+via: su
+id: uid=0(root) ... context=u:r:ksu:s0
 ```
 
-The card goes **Root shell** -> **Jailbreak mode** (`u:r:ksu:s0`). If the
-KernelSU stage loses its race, the card turns red with `KernelSU failed`, and
-you should reboot before retrying.
+The success sheet offers **打开管理器** (grant apps / load modules) and
+**重启设备**.
+
+Why one run instead of two: the fake-cred stage is the only one that ends with
+full capabilities and SELinux permissive, which is exactly what `ksud
+late-load` needs. The old shell-only run is still there as **只获取 root
+Shell** for troubleshooting, but it is no longer a prerequisite — pressing it
+first just parks a second process for nothing.
 
 ### 5. Reboot
 
-Use the `Reboot` pill. It goes through the service (`svc power reboot`), so it
-works even when no root shell is open yet. Rebooting is also the only clean way
-to remove parked processes and to unload KernelSU.
+Use the `重启设备` button in the success sheet, or the same action when a run
+fails. Rebooting is the only clean way to remove parked processes and unload
+KernelSU.
 
 After rebooting, start again from step 1: Shizuku is stopped and KernelSU is
 gone.

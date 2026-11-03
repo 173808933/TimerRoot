@@ -18,12 +18,12 @@
     <string name="step_shizuku">Shizuku</string>
     <string name="step_prepare">准备</string>
     <string name="step_diagnose">诊断</string>
-    <string name="step_root">获取 root Shell</string>
+    <string name="step_root">root + KernelSU</string>
     <string name="grant_shizuku">去授权 Shizuku</string>
 
     <!-- 主操作 -->
-    <string name="action_root">获取 root Shell</string>
-    <string name="action_ksu">加载 KernelSU</string>
+    <string name="action_root">只获取 root Shell</string>
+    <string name="action_ksu">一键 root + KernelSU</string>
     <string name="action_stop">停止</string>
 
     <!-- 设备详情 -->

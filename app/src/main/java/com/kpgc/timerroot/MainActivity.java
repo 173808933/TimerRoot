@@ -314,11 +314,10 @@ public class MainActivity extends Activity {
         card.addView(title);
         card.addView(spacer(12));
 
-        // 4 步进度：Shizuku → 准备 → 诊断 → 获取 root Shell
+        // 3 步进度：Shizuku → 准备 → 一键 root + KernelSU
         String[] labels = {
                 getString(R.string.step_shizuku),
                 getString(R.string.step_prepare),
-                getString(R.string.step_diagnose),
                 getString(R.string.step_root)
         };
         stepDots = new TextView[labels.length];
@@ -393,18 +392,18 @@ public class MainActivity extends Activity {
         card.setPadding(dp(16), dp(16), dp(16), dp(16));
         card.setBackgroundResource(R.drawable.bg_glass_card);
 
-        // 获取 root Shell
-        actionRootBtn = actionButton(R.string.action_root, true, v -> confirmRoot());
-        card.addView(actionRootBtn);
-        actionRootHint = actionHint(R.string.action_root);
-        card.addView(actionRootHint);
-        card.addView(spacer(12));
-
-        // 加载 KernelSU
+        // 主路径：一次跑完 提权 + KernelSU（fake cred 那条本来就自带 rootd）
         actionKsuBtn = actionButton(R.string.action_ksu, true, v -> confirmKsu());
         card.addView(actionKsuBtn);
         actionKsuHint = actionHint(R.string.action_ksu);
         card.addView(actionKsuHint);
+        card.addView(spacer(10));
+
+        // 备选：只要一个 uid=0 的 shell，不碰 KernelSU（调试/排障用）
+        actionRootBtn = secondaryButton(R.string.action_root, v -> confirmRoot());
+        card.addView(actionRootBtn);
+        actionRootHint = actionHint(R.string.action_root);
+        card.addView(actionRootHint);
         card.addView(spacer(12));
 
         // 停止
@@ -434,6 +433,20 @@ public class MainActivity extends Activity {
         view.setMinimumHeight(dp(48));
         view.setBackgroundResource(primary
                 ? R.drawable.bg_primary_btn_selector : R.drawable.bg_danger_btn);
+        view.setOnClickListener(click);
+        return view;
+    }
+
+    /** 次级按钮：玻璃胶囊底，字号小一号，用来放"备选路径"。 */
+    private TextView secondaryButton(int textRes, View.OnClickListener click) {
+        TextView view = new TextView(this);
+        view.setText(textRes);
+        view.setTextColor(colorTextPrimary);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        view.setGravity(Gravity.CENTER);
+        view.setPadding(dp(16), dp(12), dp(16), dp(12));
+        view.setMinimumHeight(dp(48));
+        view.setBackgroundResource(R.drawable.bg_glass_pill_selector);
         view.setOnClickListener(click);
         return view;
     }
@@ -849,13 +862,12 @@ public class MainActivity extends Activity {
         updateActions(authorized, bound, rootOpen);
     }
 
-    /** 4 步进度：Shizuku → 准备 → 诊断 → 获取 root Shell。 */
+    /** 3 步进度：Shizuku → 准备 → root + KernelSU。 */
     private void updateSteps(boolean authorized, boolean bound, boolean rooted) {
         // 状态位：第 0 步 = Shizuku 已授权；第 1 步 = 已连接(bound)；
-        // 第 2 步 = 已准备好（有 conf，粗略以 bound 为近似）；第 3 步 = root。
+        // 第 2 步 = 已拿到 root（KSU 那条一次跑完，不再单列诊断步）。
         boolean[] done = {
                 authorized,
-                bound,
                 bound,
                 rooted
         };
@@ -895,23 +907,22 @@ public class MainActivity extends Activity {
     }
 
     private void updateActions(boolean authorized, boolean bound, boolean rooted) {
-        // 获取 root Shell：需 Shizuku 已授权 + 已连接
-        boolean canRoot = authorized && bound;
-        actionRootBtn.setEnabled(canRoot);
-        actionRootBtn.setAlpha(canRoot ? 1f : 0.45f);
-        actionRootHint.setText(rooted
-                ? "已获取 root Shell（本次开机有效）"
-                : (canRoot ? "运行 CVE-2026-98260，保持 uid=0 shell"
+        // 一键流程不再依赖"先拿到 root shell"：fake 那条自己会提权。
+        boolean canRun = authorized && bound;
+
+        actionKsuBtn.setEnabled(canRun);
+        actionKsuBtn.setAlpha(canRun ? 1f : 0.45f);
+        actionKsuHint.setText("active".equals(ksu)
+                ? "已加载（u:r:ksu:s0）· 再点一次只复验 su，不重跑漏洞"
+                : (canRun ? "一次跑完：提权 + ksud late-load，约 15 秒"
                 : missingStep(authorized, bound)));
 
-        // 加载 KernelSU：需 root 已获取
-        boolean canKsu = rooted;
-        actionKsuBtn.setEnabled(canKsu);
-        actionKsuBtn.setAlpha(canKsu ? 1f : 0.45f);
-        actionKsuHint.setText("active".equals(ksu)
-                ? "KernelSU 已加载（u:r:ksu:s0），再点一次可复验 su"
-                : (canKsu ? "用伪造 cred 走一次 ksud late-load"
-                : rooted ? "" : "需先获取 root Shell"));
+        actionRootBtn.setEnabled(canRun);
+        actionRootBtn.setAlpha(canRun ? 1f : 0.45f);
+        actionRootHint.setText(rooted
+                ? "已获取 root Shell（本次开机有效）"
+                : (canRun ? "只提权，不加载 KernelSU（排障用）"
+                : missingStep(authorized, bound)));
     }
 
     private String missingStep(boolean authorized, boolean bound) {
@@ -933,6 +944,23 @@ public class MainActivity extends Activity {
     }
 
     private void showShizuku() {
+        /*
+         * 没在跑的时候，请求权限是空转（binder 都不在）。这一步真正有用的动作
+         * 是把管理器拉起来，让人在"无线调试"里点 Start —— 少一步自己去桌面找。
+         */
+        if (!safePing()) {
+            android.content.Intent i = getPackageManager()
+                    .getLaunchIntentForPackage("moe.shizuku.privileged.api");
+            if (i != null) {
+                addLog("Shizuku 未运行，已打开管理器：无线调试 → Start");
+                try {
+                    startActivity(i);
+                    return;
+                } catch (Throwable t) {
+                    addLog("打开 Shizuku 失败：" + t);
+                }
+            }
+        }
         StringBuilder sb = new StringBuilder();
         try {
             sb.append("running: ").append(Shizuku.pingBinder()).append('\n');
@@ -1489,10 +1517,9 @@ public class MainActivity extends Activity {
                 addLog(out);
                 ui.post(this::applyDetails);
                 if (rootOpen && !"active".equals(ksu)) {
-                    // Do not auto-load KernelSU: the fake-cred stage needs its
-                    // own verified conf fields and parks on failure. Keep it a
-                    // manual, deliberate second step.
-                    addLog("已获得 root Shell —— KernelSU 是需要手动执行的第二步");
+                    // 备选路径：只提权。要走 KernelSU 直接点上面那个一键按钮，
+                    // 它会自己再跑一次（fake cred），不需要这里的 shell。
+                    addLog("已获得 root Shell —— 要 KernelSU 请点「一键 root + KernelSU」");
                 }
             } catch (Throwable t) {
                 addLog("提权失败：" + t);
@@ -1510,12 +1537,14 @@ public class MainActivity extends Activity {
             return;
         }
         new AlertDialog.Builder(this)
-                .setTitle("加载 KernelSU？")
-                .setMessage("用伪造的 cred 走一次 ksud late-load。\n\n"
-                        + "- 成功后 su 可在 u:r:ksu:s0 下使用\n"
-                        + "- 父进程会挂起（park），需要重启清理\n"
-                        + "- 运行期间不要操作设备")
-                .setPositiveButton("运行", (d, w) -> runKsu())
+                .setTitle("一键 root + KernelSU？")
+                .setMessage("一次跑完：清 panic_on_warn → 伪造 cred → 关 SELinux → "
+                        + "启动 rootd → ksud late-load。\n\n"
+                        + "- 约 10~20 秒，成功后 su 在 u:r:ksu:s0\n"
+                        + "- 父进程会挂起（park），用完重启清理\n"
+                        + "- 运行期间不要操作设备\n\n"
+                        + "不必先点「只获取 root Shell」，那条是排障用的备选路径。")
+                .setPositiveButton("开始", (d, w) -> runKsu())
                 .setNegativeButton("取消", null)
                 .show();
     }
@@ -1631,9 +1660,15 @@ public class MainActivity extends Activity {
                 ui.post(() -> {
                     applyDetails();
                     if (ok) {
-                        toast(suOk ? "KernelSU 已加载，su 可用（u:r:ksu:s0），打开管理器即可授权"
-                                : "KernelSU 模块已加载，但 su 还没通过验证，看日志");
+                        // fake 那条跑通就说明 rootd 已经在监听，root 是确实拿到的
+                        rootOpen = true;
+                        applyDetails();
                         refreshDetails();
+                        if (suOk) {
+                            showKsuReady();
+                        } else {
+                            toast("KernelSU 模块已加载，但 su 还没通过验证，看日志");
+                        }
                     } else {
                         statusTitle.setText(R.string.status_failed);
                         statusTitle.setTextColor(colorRed);
@@ -1647,6 +1682,35 @@ public class MainActivity extends Activity {
                 addLog("KernelSU 执行失败：" + t);
             }
         }).start();
+    }
+
+    /** 成功落地页：只剩两个动作 —— 去管理器授权，或者稍后自己用。 */
+    private void showKsuReady() {
+        new AlertDialog.Builder(this)
+                .setTitle("KernelSU 已就绪")
+                .setMessage("su 已在 u:r:ksu:s0 下可用。\n\n"
+                        + "· 打开管理器给应用授权，模块/超级用户都在那里\n"
+                        + "· 本次开机有效，重启即失效（也顺便清掉 park 的进程）\n"
+                        + "· 想再确认一次 su，再点「一键 root + KernelSU」只会复验，不重跑漏洞")
+                .setPositiveButton("打开管理器", (d, w) -> openManager())
+                .setNeutralButton("重启设备", (d, w) -> reboot())
+                .setNegativeButton("稍后", null)
+                .show();
+    }
+
+    private void openManager() {
+        String pkg = mgr == null ? "" : mgr.replaceFirst("^(auto|manual):", "");
+        for (String cand : new String[]{pkg, "me.weishu.kernelsu", "me.weishu.kernelsu.next"}) {
+            if (cand == null || cand.isEmpty()) {
+                continue;
+            }
+            android.content.Intent i = getPackageManager().getLaunchIntentForPackage(cand);
+            if (i != null) {
+                startActivity(i);
+                return;
+            }
+        }
+        toast("没找到 KernelSU 管理器，先安装或手动打开");
     }
 
     private void stopRoot() {
