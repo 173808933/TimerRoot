@@ -36,6 +36,7 @@ import java.util.regex.Matcher;
 import java.io.InputStream;
 import java.io.FileOutputStream;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
 
@@ -77,6 +78,7 @@ public class MainActivity extends Activity {
     private TextView detailKernel;
     private TextView detailKsud;
     private TextView detailKsu;
+    private TextView detailMgr;
     private TextView detailSelinux;
     private TextView detailSeccomp;
     private TextView logText;
@@ -86,6 +88,7 @@ public class MainActivity extends Activity {
     private TextView tabLog;
     private String ksud = "-";
     private String ksu = "unknown";
+    private String mgr = "auto";
     private String selinux = "-";
     private String seccomp = "-";
 
@@ -210,6 +213,8 @@ public class MainActivity extends Activity {
         detailKernel = addRow(details, "内核", "-", true);
         detailKsud = addRow(details, "ksud", "-", true);
         detailKsu = addRow(details, "KernelSU", "-", true);
+        detailMgr = addRow(details, "管理器", "自动识别 · 点此指定", true);
+        ((View) detailMgr.getParent()).setOnClickListener(v -> showManagerPicker());
         detailSelinux = addRow(details, "SELinux", "-", true);
         detailSeccomp = addRow(details, "Seccomp", "-", false);
         body.addView(details);
@@ -463,6 +468,8 @@ public class MainActivity extends Activity {
                 ksud = value;
             } else if (key.equals("ksu")) {
                 ksu = value;
+            } else if (key.equals("mgr")) {
+                mgr = value;
             } else if (key.equals("build") && !value.equals(serviceBuild)) {
                 serviceBuild = value;
                 addLog("用户服务版本：" + value);
@@ -484,6 +491,7 @@ public class MainActivity extends Activity {
         detailKsud.setText("not loaded".equals(ksud) ? "未加载"
                 : ("missing".equals(ksud) ? "缺失" : ksud));
         detailKsu.setText("active".equals(ksu) ? "越狱模式（u:r:ksu:s0）" : "未启用");
+        detailMgr.setText(describeManager());
         detailSelinux.setText(selinux);
         detailSeccomp.setText(seccomp);
         boolean shizuku = safePing();
@@ -785,6 +793,85 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    private String describeManager() {
+        if (mgr == null || mgr.isEmpty() || "auto".equals(mgr)) {
+            return "自动识别 · 点此指定";
+        }
+        if (mgr.startsWith("manual:")) {
+            return "手动 · " + mgr.substring(7) + " · 点此更改";
+        }
+        if (mgr.startsWith("auto:")) {
+            return "自动 · " + mgr.substring(5) + " · 点此更改";
+        }
+        return mgr + " · 点此更改";
+    }
+
+    /** 列出设备上所有可用管理器，选一个写进覆盖文件。 */
+    private void showManagerPicker() {
+        if (service == null) {
+            toast("正在连接 Shizuku…");
+            bindService();
+            return;
+        }
+        new Thread(() -> {
+            String raw;
+            try {
+                raw = service.ksuManagers();
+            } catch (Throwable t) {
+                raw = "";
+                addLog("列管理器失败：" + t);
+            }
+            final String list = raw;
+            ui.post(() -> {
+                ArrayList<String> labels = new ArrayList<>();
+                ArrayList<String> pkgs = new ArrayList<>();
+                labels.add("自动识别（推荐）");
+                pkgs.add("auto");
+                for (String line : list.split("\n")) {
+                    String s1 = line.trim();
+                    if (s1.isEmpty()) {
+                        continue;
+                    }
+                    String[] f = s1.split("\t");
+                    if (f.length < 3) {
+                        continue;
+                    }
+                    labels.add(f[0] + "   [" + f[2] + "]");
+                    pkgs.add(f[0]);
+                }
+                if (labels.size() == 1) {
+                    toast("没有发现带 libksud.so 的管理器");
+                }
+                new AlertDialog.Builder(this)
+                        .setTitle("KernelSU 管理器")
+                        .setItems(labels.toArray(new String[0]),
+                                (d, which) -> applyManager(pkgs.get(which)))
+                        .setNegativeButton("取消", null)
+                        .show();
+            });
+        }).start();
+    }
+
+    private void applyManager(String pkg) {
+        if (service == null) {
+            return;
+        }
+        toast("auto".equals(pkg) ? "恢复自动识别…" : "指定 " + pkg + "…");
+        new Thread(() -> {
+            try {
+                final String r = service.setKsuManager(pkg);
+                addLog(r);
+                ui.post(() -> {
+                    toast("auto".equals(pkg) ? "已恢复自动识别" : "已指定 " + pkg);
+                    refreshDetails();
+                });
+            } catch (Throwable t) {
+                addLog("指定失败：" + t);
+                ui.post(() -> toast("指定失败：" + t));
+            }
+        }).start();
+    }
+
     private void prepare() {
         if (!safePing()) {
             new AlertDialog.Builder(this)
@@ -1073,8 +1160,9 @@ public class MainActivity extends Activity {
                  * 已经跑着的用户服务进程，数字不变就会拿到旧进程的 binder，
                  * 新加的 AIDL 方法在旧进程里不存在（表现为 unknown transaction）。
                  * 7 -> 8：importConf
+                 * 8 -> 9：ksuManagers / setKsuManager
                  */
-                .version(8);
+                .version(9);
     }
 
     /** 当前 UI 上的全部日志（导出和复制都用它）。 */

@@ -16,4 +16,6 @@ interface IUserService {
     String rootdExec(String cmd) = 12;
     String suCheck() = 13;
     String importConf(String name, String text) = 14;
+    String ksuManagers() = 15;
+    String setKsuManager(String pkg) = 16;
 }

@@ -10,9 +10,8 @@ shell-domain exploit from an ordinary app.
 
 ## What this branch (`conf-driven`) changes
 
-Cut from `main` (upstream mirror `b97535b`): 11 commits, 20 files, +5695/−127.
-Everything is additive — upstream code paths stay untouched for devices that
-don't use these features.
+Cut from `main` (upstream mirror `b97535b`). Everything is additive — upstream
+code paths stay untouched for devices that don't use these features.
 
 ### 1. Exploit built from source, driven by a conf (`4562388`, `bce859b`)
 
@@ -46,6 +45,29 @@ process would deserialise the new AIDL incorrectly.
 
 Validated by generating profiles from two real boot images and diffing all 20
 fields against the hand-written confs — identical.
+
+### 4. Manager picker (`0.59`)
+
+Auto-detection was already content-based: any installed package that ships
+`lib/arm64/libksud.so` is accepted, so renamed forks (SukiSU, ReSukiSU,
+KSU-Next, Bakasu, SuperManager) work without a list. The known-name array only
+orders the candidates, so an unrelated app that happens to bundle `libksud.so`
+cannot win by being earlier in `pm` output.
+
+What was missing was an escape hatch. If two managers are installed, or the
+wrong package gets picked, there was no way to override it short of
+uninstalling. Now:
+
+- `ksuManagers()` lists every package that carries `libksud.so` (plus names
+  that look like a manager, whose lib may live inside the APK).
+- `setKsuManager(pkg)` writes `/data/local/tmp/ksud.pkg.override`; the prepare
+  path consults it first and falls back to auto if that package has no ksud.
+  `setKsuManager("auto")` deletes the file.
+- The details card grew a "管理器" row showing `自动 · <pkg>` or
+  `手动 · <pkg>`; tapping it opens the picker.
+
+`IUserService.aidl` grew two methods, so `UserServiceArgs.version` goes
+8 → 9.
 
 ### Behaviour differences
 

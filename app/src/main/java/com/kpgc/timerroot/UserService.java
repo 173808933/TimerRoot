@@ -25,7 +25,7 @@ import java.util.zip.ZipFile;
 public class UserService extends IUserService.Stub {
 
     /** 服务端版本标记：用来判断当前跑的 UserService 是不是新装的那份。 */
-    private static final String BUILD = "0.58";
+    private static final String BUILD = "0.59";
     private static final String PKG = "com.kpgc.timerroot";
     private static final String BIN = "/data/local/tmp/timer";
     private static final String CONF = "/data/local/tmp/timer.conf";
@@ -34,11 +34,19 @@ public class UserService extends IUserService.Stub {
     private static final String LOG = "/data/local/tmp/timer.log";
     /** Copied from whichever installed manager ships lib/arm64/libksud.so. */
     private static final String KSUD = "/data/local/tmp/ksud";
+    /**
+     * 手动指定的管理器包名；存在时优先于自动嗅探。
+     * 自动嗅探已经能认任何带 libksud.so 的包，这里只是给"认错了"留一个出口：
+     * 设备上同时装了两个管理器、或者某个普通 app 恰好打包了 libksud.so 时用得上。
+     */
+    private static final String KSU_OVERRIDE = "/data/local/tmp/ksud.pkg.override";
     private static final int MAX_OUTPUT = 20000;
 
     private Process rootProcess;
     private BufferedWriter rootInput;
     private final BlockingQueue<String> rootLines = new LinkedBlockingQueue<>();
+    /** 最近一次成功采用的管理器包名，只用于 info() 展示。 */
+    private String lastMgr = "";
 
     public UserService() {
     }
@@ -298,8 +306,12 @@ public class UserService extends IUserService.Stub {
         }
         String ksu = execOut("timeout 3 /system/bin/su -c id 2>/dev/null").contains("u:r:ksu:s0")
                 ? "active" : "not loaded";
+        String manual = ksuOverride();
+        String mgr = manual.isEmpty()
+                ? (lastMgr.isEmpty() ? "auto" : "auto:" + lastMgr)
+                : "manual:" + manual;
         return "build=" + BUILD + "\nselinux=" + selinux + "\nseccomp=" + seccomp
-                + "\nksud=" + ksud + "\nksu=" + ksu + "\n";
+                + "\nksud=" + ksud + "\nksu=" + ksu + "\nmgr=" + mgr + "\n";
     }
 
     /**
@@ -567,9 +579,9 @@ public class UserService extends IUserService.Stub {
      */
     /** 已知的管理器包名，排在前面；其余带 libksud.so 的包只作后备。 */
     private static final String[] KSU_PACKAGES = {
-            "me.weishu.kernelsu", "me.weishu.kernelsu.pr", "com.rifsxd.ksunext",
-            "com.sukisu.ultra", "com.resukisu.resukisu", "org.bakasu.bakasu",
-            "com.kowx712.supermanager"
+            "me.weishu.kernelsu", "me.weishu.kernelsu.pr", "me.weishu.kernelsu.next",
+            "com.rifsxd.ksunext", "com.sukisu.ultra", "com.resukisu.resukisu",
+            "org.bakasu.bakasu", "me.yuki.fina", "com.kowx712.supermanager"
     };
 
     private static int ksuRank(String pkg) {
@@ -582,6 +594,21 @@ public class UserService extends IUserService.Stub {
     }
 
     private String prepareKsud() {
+        String auto = prepareKsudAuto();
+        String want = ksuOverride();
+
+        if (want.isEmpty()) {
+            return auto;
+        }
+        String forced = adoptFromApks(listApks(), want);
+        if (forced != null) {
+            return forced + "（手动指定 " + want + "）";
+        }
+        return "指定的 " + want + " 上没有 libksud.so，已回落自动\n" + auto;
+    }
+
+    /** pm 列包并排序；prepareKsud 和管理器列表共用。 */
+    private java.util.List<String[]> listApks() {
         java.util.ArrayList<String[]> apks = new java.util.ArrayList<>();
         String listing = shell("pm list packages -f 2>/dev/null");
         for (String line : listing.split("\n")) {
@@ -599,6 +626,11 @@ public class UserService extends IUserService.Stub {
         // pm 是按下标顺序输出的，com.* 会排在 me.* 前面；不排序就会选中
         // 某个碰巧带 libksud.so 的普通 app（实测选到了 com.sevenk.core）。
         apks.sort((a, b) -> Integer.compare(ksuRank(a[1]), ksuRank(b[1])));
+        return apks;
+    }
+
+    private String prepareKsudAuto() {
+        java.util.List<String[]> apks = listApks();
 
         // 1) lib 目录里就有 libksud.so
         for (String[] a : apks) {
@@ -640,8 +672,85 @@ public class UserService extends IUserService.Stub {
 
     private static boolean looksLikeManager(String pkg) {
         String p = pkg.toLowerCase();
+        /* 只做"要不要打开 APK 抽一下"的粗筛，命中率不重要；
+         * 真正的判据始终是包里有没有 libksud.so。 */
         return p.contains("ksu") || p.contains("sukisu") || p.contains("kernelsu")
-                || p.contains("supermanager") || p.contains("bakasu");
+                || p.contains("supermanager") || p.contains("bakasu")
+                || p.contains("yuki.fina");
+    }
+
+    /** 手动指定：从指定包取 libksud.so，取不到返回 null（调用方回落自动）。 */
+    private String adoptFromApks(java.util.List<String[]> apks, String pkg) {
+        for (String[] a : apks) {
+            if (!pkg.equals(a[1])) {
+                continue;
+            }
+            File dir = new File(a[0]).getParentFile();
+            if (dir != null) {
+                for (String abi : new String[]{"arm64", "arm"}) {
+                    File c = new File(dir, "lib/" + abi + "/libksud.so");
+                    if (c.isFile()) {
+                        return adoptKsud(c.getAbsolutePath(), pkg, "lib/" + abi);
+                    }
+                }
+            }
+            // extractNativeLibs=false：libksud.so 只在 APK 里
+            return extractKsud(a[0], pkg);
+        }
+        return null;
+    }
+
+    private String ksuOverride() {
+        try {
+            String s = shell("cat " + KSU_OVERRIDE + " 2>/dev/null | head -1").trim();
+            return s.contains(".") ? s : "";
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /**
+     * 列出可用的管理器，供界面手选。
+     * 每行 "包名<TAB>apk 路径<TAB>来源"，只列真正带 libksud.so 的包，
+     * 外加名字像管理器的包（它们的 libksud.so 可能在 APK 里，要抽才知道）。
+     */
+    @Override
+    public String ksuManagers() {
+        StringBuilder sb = new StringBuilder();
+        for (String[] a : listApks()) {
+            String how = "";
+            File dir = new File(a[0]).getParentFile();
+            if (dir != null) {
+                for (String abi : new String[]{"arm64", "arm"}) {
+                    if (new File(dir, "lib/" + abi + "/libksud.so").isFile()) {
+                        how = "lib/" + abi;
+                        break;
+                    }
+                }
+            }
+            if (how.isEmpty()) {
+                if (!looksLikeManager(a[1])) {
+                    continue;
+                }
+                how = "apk";
+            }
+            sb.append(a[1]).append('\t').append(a[0]).append('\t').append(how).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** 写/清覆盖文件，然后立刻按新选择重跑一次 ksud 定位。 */
+    @Override
+    public String setKsuManager(String pkg) {
+        if (pkg == null || pkg.isEmpty() || "auto".equals(pkg)) {
+            shell("rm -f " + KSU_OVERRIDE);
+            return "已恢复自动识别\n" + prepareKsud();
+        }
+        if (!pkg.matches("[A-Za-z0-9._]+")) {
+            return "包名不合法：" + pkg;
+        }
+        shell("printf '%s' '" + pkg + "' > " + KSU_OVERRIDE);
+        return "已指定 " + pkg + "\n" + prepareKsud();
     }
 
     /** 复用已有副本（必须是真 ELF），否则从 src 复制并写包名 sidecar。 */
@@ -651,6 +760,9 @@ public class UserService extends IUserService.Stub {
                 && "7f454c46".equals(shell("head -c 4 '" + KSUD
                         + "' 2>/dev/null | od -An -tx1 | tr -d ' \\n'"))
                 && pkg.equals(sidecar);
+        if (!pkg.isEmpty()) {
+            lastMgr = pkg;
+        }
         if (existing) {
             return "ksud=" + KSUD + "（沿用现有文件，来源=" + src
                     + "，方式=" + how + "，ver=" + ksudVersion() + "）";
