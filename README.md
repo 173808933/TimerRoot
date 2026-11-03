@@ -69,6 +69,24 @@ uninstalling. Now:
 `IUserService.aidl` grew two methods, so `UserServiceArgs.version` goes
 8 → 9.
 
+### 5. KernelSU state is judged by running su (`0.63`)
+
+`suCheck()` used to open with `new File("/system/bin/su").exists()` and bail out
+with "su 不存在" when the file was missing. That check is wrong for every
+KernelSU that ships built-in su: `su_compat` rewrites `execve("/system/bin/su")`
+to a memfd-backed blob inside the kernel (the module carries the
+`install su session fd failed` path), so **the file never exists on disk**. The
+same test was used by `info()`, which is why the UI kept reporting KernelSU as
+"not loaded" even when `kernelsu` was sitting in `/proc/modules`.
+
+The check is now an actual execution: `su`, `/system/bin/su`,
+`/data/adb/ksu/bin/su` are tried in order, and success means `id` reports
+`uid=0` (the user service itself runs as shell/2000, so nothing else can produce
+it). On failure the first real error is printed instead of a guess. `info()`
+uses the same helper, and tapping "加载 KernelSU" once KSU is active re-runs the
+verification instead of re-running the exploit, which would only park another
+zombie. `UserServiceArgs.version` goes 9 → 10.
+
 ### Behaviour differences
 
 | Scenario | Upstream | This branch |

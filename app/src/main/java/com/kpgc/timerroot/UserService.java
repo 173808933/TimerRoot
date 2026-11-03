@@ -25,7 +25,7 @@ import java.util.zip.ZipFile;
 public class UserService extends IUserService.Stub {
 
     /** 服务端版本标记：用来判断当前跑的 UserService 是不是新装的那份。 */
-    private static final String BUILD = "0.62";
+    private static final String BUILD = "0.63";
     private static final String PKG = "com.kpgc.timerroot";
     private static final String BIN = "/data/local/tmp/timer";
     private static final String CONF = "/data/local/tmp/timer.conf";
@@ -304,8 +304,7 @@ public class UserService extends IUserService.Stub {
         } else if (selinux.contains("Permissive")) {
             ksud = "missing";
         }
-        String ksu = execOut("timeout 3 /system/bin/su -c id 2>/dev/null").contains("u:r:ksu:s0")
-                ? "active" : "not loaded";
+        String ksu = suId() != null ? "active" : "not loaded";
         String manual = ksuOverride();
         String mgr = manual.isEmpty()
                 ? (lastMgr.isEmpty() ? "auto" : "auto:" + lastMgr)
@@ -470,22 +469,69 @@ public class UserService extends IUserService.Stub {
     }
 
     /**
-     * 端到端验证：以 shell(2000) 身份跑 su，看拿到的到底是不是 u:r:ksu:s0。
-     * 这是 KSU 是否真的可用的唯一判据 —— 模块载入不等于 su 能用。
+     * 真的跑一次 su 并返回 id 输出；没拿到 uid=0 就返回 null。
+     *
+     * 本进程是 Shizuku 拉起来的 uid=2000 shell，所以「uid=0」只可能来自
+     * KernelSU 的提权 —— 这就是它有没有生效的判据。特意不查
+     * /system/bin/su 是否存在：内建 su 是内核在 execve 里顶上去的，磁盘上没这个文件，
+     * 恰恰是没被 KSU 接管时才会露出一个真的（或无用的）存根。
+     */
+    private String suId() {
+        for (String cand : new String[]{"su", "/system/bin/su", "/data/adb/ksu/bin/su"}) {
+            String r = shell("timeout 6 " + cand + " -c id 2>&1");
+            if (r.contains("uid=0")) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 端到端验证：以 shell(2000) 身份真的跑一次 su，看拿到的到底是不是 u:r:ksu:s0。
+     *
+     * 不能先看 /system/bin/su 在不在 —— KernelSU / KernelSU-Next 的 su 是内核
+     * 内建的：sucompat 在 do_execveat_common 里把这条路径换成内核里的 blob，
+     * 用 memfd 起进程（模块里的 "install su session fd failed" 就是这段），
+     * 磁盘上根本没有这个文件。反过来，ColorOS 某些版本确实带了一个没用的
+     * /system/bin/su 存根，文件在也不代表 hook 生效。所以只看执行结果。
      */
     @Override
     public String suCheck() {
-        String su = "/system/bin/su";
-        if (!new File(su).exists()) {
-            return "su 不存在：" + su + "\n模块可能只加载了一半，或管理器路径不同";
+        StringBuilder sb = new StringBuilder();
+        String mods = execOut("grep '^kernelsu ' /proc/modules 2>/dev/null");
+        sb.append("module: ")
+                .append(mods.isEmpty() || "unknown".equals(mods) ? "未加载" : mods.trim())
+                .append('\n');
+
+        String hit = null;
+        String via = null;
+        String firstErr = null;
+        for (String cand : new String[]{"su", "/system/bin/su",
+                "/data/adb/ksu/bin/su", "/data/local/tmp/ksud su"}) {
+            String r = shell("timeout 8 " + cand + " -c id 2>&1");
+            if (r.contains("uid=0")) {
+                hit = r;
+                via = cand;
+                break;
+            }
+            if (firstErr == null && !r.isEmpty()) {
+                firstErr = cand + " -> " + r.trim();
+            }
         }
-        String id = shell("timeout 5 " + su + " -c id 2>&1");
-        String enf = shell("timeout 5 " + su + " -c getenforce 2>&1");
-        String mods = shell("grep -c '^kernelsu ' /proc/modules 2>/dev/null");
-        return "su=" + su + "\n"
-                + "id=" + id.trim() + "\n"
-                + "getenforce=" + enf.trim() + "\n"
-                + "modules_kernelsu=" + mods.trim();
+        if (hit != null) {
+            sb.append("via: ").append(via).append('\n');
+            sb.append("id: ").append(hit.trim()).append('\n');
+        } else {
+            sb.append("id: 失败（")
+                    .append(firstErr == null ? "没有任何输出" : firstErr)
+                    .append("）\n");
+        }
+        sb.append("getenforce: ").append(execOut("getenforce")).append('\n');
+        // /data/adb 是 0700 root，shell 直接 ls 永远 Permission denied —— 必须借 su 才看得见
+        String ksuDir = via == null ? "n/a（su 不可用）"
+                : shell("timeout 6 " + via + " -c 'ls -ld /data/adb/ksu /data/adb/ksu/bin 2>&1'");
+        sb.append("ksu_dir: ").append(ksuDir.trim().replace('\n', ' ')).append('\n');
+        return sb.toString();
     }
 
     @Override

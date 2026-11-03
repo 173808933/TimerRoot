@@ -909,7 +909,7 @@ public class MainActivity extends Activity {
         actionKsuBtn.setEnabled(canKsu);
         actionKsuBtn.setAlpha(canKsu ? 1f : 0.45f);
         actionKsuHint.setText("active".equals(ksu)
-                ? "KernelSU 已加载（u:r:ksu:s0）"
+                ? "KernelSU 已加载（u:r:ksu:s0），再点一次可复验 su"
                 : (canKsu ? "用伪造 cred 走一次 ksud late-load"
                 : rooted ? "" : "需先获取 root Shell"));
     }
@@ -1501,6 +1501,14 @@ public class MainActivity extends Activity {
     }
 
     private void confirmKsu() {
+        /*
+         * 已经加载过就不要再跑一遍漏洞：fake cred 那次会把父进程 park 住，
+         * 再跑只会多留一个僵尸，还得重启。这里改成"复验 su" —— 开机内随时能点。
+         */
+        if ("active".equals(ksu)) {
+            verifySu();
+            return;
+        }
         new AlertDialog.Builder(this)
                 .setTitle("加载 KernelSU？")
                 .setMessage("用伪造的 cred 走一次 ksud late-load。\n\n"
@@ -1513,6 +1521,24 @@ public class MainActivity extends Activity {
     }
 
     private long ksuStartedAt;
+
+    /** 单独复验 su，不碰内核 —— 已加载后想再确认一次时用。 */
+    private void verifySu() {
+        if (service == null) {
+            addLog("请先绑定服务");
+            return;
+        }
+        new Thread(() -> {
+            try {
+                final String out = service.suCheck();
+                addLog("—— 验证 su ——\n" + out.trim());
+                final boolean ok = out.contains("u:r:ksu:s0");
+                ui.post(() -> toast(ok ? "su 可用（u:r:ksu:s0）" : "su 未通过验证，看日志"));
+            } catch (Throwable t) {
+                addLog("验证 su 失败：" + t);
+            }
+        }).start();
+    }
 
     private void runKsu() {
         if (service == null) {
@@ -1605,8 +1631,8 @@ public class MainActivity extends Activity {
                 ui.post(() -> {
                     applyDetails();
                     if (ok) {
-                        toast(suOk ? "KernelSU 已加载，su 可用（u:r:ksu:s0）"
-                                : "KernelSU 已加载，但 su 还没通过验证，看日志");
+                        toast(suOk ? "KernelSU 已加载，su 可用（u:r:ksu:s0），打开管理器即可授权"
+                                : "KernelSU 模块已加载，但 su 还没通过验证，看日志");
                         refreshDetails();
                     } else {
                         statusTitle.setText(R.string.status_failed);
@@ -1704,8 +1730,9 @@ public class MainActivity extends Activity {
                  * 新加的 AIDL 方法在旧进程里不存在（表现为 unknown transaction）。
                  * 7 -> 8：importConf
                  * 8 -> 9：ksuManagers / setKsuManager
+                 * 9 -> 10：内建 su 的验证方式（不再看 /system/bin/su 是否存在）
                  */
-                .version(9);
+                .version(10);
     }
 
     /** 当前 UI 上的全部日志（导出和复制都用它）。 */
