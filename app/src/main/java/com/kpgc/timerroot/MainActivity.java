@@ -1077,9 +1077,15 @@ public class MainActivity extends Activity {
         final EditText input = new EditText(this);
         input.setSingleLine(true);
         input.setHint("https://…/payload.bin 或 OTA zip 直链");
-        input.setText(getSharedPreferences("timerroot", MODE_PRIVATE)
-                .getString("ota_url", ""));
-        new AlertDialog.Builder(this)
+        /*
+         * 每次都从空开始。上一次的链接还留着（成功推过一次才存），但不自动填 ——
+         * 过期链接带签名参数，直接塞进输入框很容易让人以为"这次用的是新的"。
+         * 需要复用就点「上次」，不点就是干净的空框。
+         */
+        input.setText("");
+        final String last = getSharedPreferences("timerroot", MODE_PRIVATE)
+                .getString("ota_url", "");
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
                 .setTitle("从 OTA 链接推导")
                 .setMessage("只下载 boot 分区（通常几十 MB），不会整包下载几个 GB。\n"
                         + "支持直链 payload.bin，也支持 payload.bin 以 Stored 方式存放的 OTA zip。")
@@ -1093,8 +1099,18 @@ public class MainActivity extends Activity {
                     showTab(1);
                     deriveFromOta(url);
                 })
-                .setNegativeButton("取消", null)
-                .show();
+                .setNegativeButton("取消", null);
+        if (!last.isEmpty()) {
+            // 有记录才给这个按钮；点了只把文本填进去，不关对话框
+            builder.setNeutralButton("上次", null);
+        }
+        AlertDialog dialog = builder.show();
+        if (!last.isEmpty()) {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+                input.setText(last);
+                input.setSelection(input.getText().length());
+            });
+        }
     }
 
     private void deriveFromOta(String url) {
