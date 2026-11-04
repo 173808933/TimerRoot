@@ -95,6 +95,7 @@ public class MainActivity extends Activity {
     private TextView detailKsud;
     private TextView detailKsu;
     private TextView detailMgr;
+    private TextView detailVivo;
     private TextView detailSelinux;
     private TextView detailSeccomp;
     private TextView detailRootState;
@@ -130,6 +131,7 @@ public class MainActivity extends Activity {
             service = IUserService.Stub.asInterface(binder);
             bound = true;
             addLog("用户服务已连接");
+            pushVivoMode();
             refreshDetails();
             maybeAutoPrepare();
         }
@@ -502,7 +504,14 @@ public class MainActivity extends Activity {
         detailRootState = addRow(detailBody, R.string.detail_root, "-");
         detailMgr = addRow(detailBody, R.string.detail_manager, "-");
         detailMgr.setText(describeManager());
+        if (detailVivo != null) {
+            detailVivo.setText(describeVivo());
+        }
         ((View) detailMgr.getParent()).setOnClickListener(v -> showManagerPicker());
+
+        detailVivo = addRow(detailBody, R.string.detail_vivo, "-");
+        detailVivo.setText(describeVivo());
+        ((View) detailVivo.getParent()).setOnClickListener(v -> showVivoPicker());
 
         card.addView(detailBody);
 
@@ -821,6 +830,9 @@ public class MainActivity extends Activity {
                 : ("missing".equals(ksud) ? "缺失" : ksud));
         detailKsu.setText("active".equals(ksu) ? "越狱模式（u:r:ksu:s0）" : "未启用");
         detailMgr.setText(describeManager());
+        if (detailVivo != null) {
+            detailVivo.setText(describeVivo());
+        }
         detailSelinux.setText(selinux);
         detailSeccomp.setText(seccomp);
         detailRootState.setText(rootOpen ? "uid=0 · 本次开机有效" : "未获取");
@@ -1320,6 +1332,93 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /* ------------------------------------------------------------ vivo 适配
+     *
+     * 为什么要开关：vivo 的 sys_exit 回调表清零 + riskdetect 只对 OriginOS 有意义。
+     * 其它机型跑同一份二进制时，App 会显式下发 TIMER_VIVO=0，二进制那边再要求
+     * conf 里有 vivo_disarm=1 才动手 —— 两层都关着，等同于旧行为。
+     *
+     * 识别只认 Build.MANUFACTURER/BRAND，不读隐藏属性，避免被 Android 的
+     * hidden-API 限制绊住。iQOO 的 manufacturer 同样是 vivo。
+     */
+    private static final String PREF_VIVO = "vivo_mode";   // auto | on | off
+
+    private boolean detectedVivo() {
+        String m = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER.toLowerCase(Locale.US);
+        String b = Build.BRAND == null ? "" : Build.BRAND.toLowerCase(Locale.US);
+        return m.contains("vivo") || b.contains("vivo") || b.contains("iqoo");
+    }
+
+    private String vivoModePref() {
+        return getSharedPreferences("timer", MODE_PRIVATE)
+                .getString(PREF_VIVO, "auto");
+    }
+
+    /** 回给服务的值："1" 强制走、"0" 强制跳过。自动模式按机型判定。 */
+    private String effectiveVivoMode() {
+        String mode = vivoModePref();
+        if ("on".equals(mode)) {
+            return "1";
+        }
+        if ("off".equals(mode)) {
+            return "0";
+        }
+        return detectedVivo() ? "1" : "0";
+    }
+
+    private String describeVivo() {
+        String mode = vivoModePref();
+        String who = detectedVivo() ? "检测到 vivo" : "非 vivo 机型";
+        String eff = "1".equals(effectiveVivoMode()) ? "启用" : "跳过";
+        if ("auto".equals(mode)) {
+            return who + " · 自动（" + eff + "）· 点此更改";
+        }
+        return who + " · 强制" + ("on".equals(mode) ? "开启" : "关闭")
+                + "（当前" + eff + "）· 点此更改";
+    }
+
+    private void pushVivoMode() {
+        if (service == null) {
+            return;
+        }
+        new Thread(() -> {
+            try {
+                String r = service.setVivoMode(effectiveVivoMode());
+                Log.i(TAG, "setVivoMode: " + r);
+            } catch (Throwable t) {
+                Log.i(TAG, "setVivoMode failed: " + t);
+            }
+        }).start();
+    }
+
+    private void showVivoPicker() {
+        final String[] labels = {
+                "自动（检测到 vivo 才启用）",
+                "强制开启（vivo 收尾：清 sys_exit 回调 + 停 riskdetect）",
+                "强制关闭（其它机型用这个）"
+        };
+        final String[] vals = {"auto", "on", "off"};
+        String cur = vivoModePref();
+        int checked = 0;
+        for (int i = 0; i < vals.length; i++) {
+            if (vals[i].equals(cur)) {
+                checked = i;
+            }
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("vivo 适配")
+                .setSingleChoiceItems(labels, checked, (d, w) -> {
+                    getSharedPreferences("timer", MODE_PRIVATE).edit()
+                            .putString(PREF_VIVO, vals[w]).apply();
+                    d.dismiss();
+                    pushVivoMode();
+                    applyDetails();
+                    toast("vivo 适配：" + labels[w]);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     private String describeManager() {
         if (mgr == null || mgr.isEmpty() || "auto".equals(mgr)) {
             return "自动识别 · 点此指定";
@@ -1795,8 +1894,9 @@ public class MainActivity extends Activity {
                  * 7 -> 8：importConf
                  * 8 -> 9：ksuManagers / setKsuManager
                  * 9 -> 10：内建 su 的验证方式（不再看 /system/bin/su 是否存在）
+                 * 10 -> 11：setVivoMode（vivo 收尾开关）
                  */
-                .version(10);
+                .version(11);
     }
 
     /** 当前 UI 上的全部日志（导出和复制都用它）。 */

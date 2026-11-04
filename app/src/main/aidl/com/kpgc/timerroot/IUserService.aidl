@@ -18,4 +18,6 @@ interface IUserService {
     String importConf(String name, String text) = 14;
     String ksuManagers() = 15;
     String setKsuManager(String pkg) = 16;
+    /** "1" = 强制走 vivo 收尾、"0" = 强制跳过、其它 = 由 conf 决定 */
+    String setVivoMode(String mode) = 17;
 }

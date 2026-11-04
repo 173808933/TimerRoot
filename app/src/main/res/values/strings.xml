@@ -37,6 +37,7 @@
     <string name="detail_seccomp">Seccomp</string>
     <string name="detail_root">root 状态</string>
     <string name="detail_manager">管理器</string>
+    <string name="detail_vivo">vivo 适配</string>
 
     <!-- 工具 -->
     <string name="tool_config">配置</string>

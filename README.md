@@ -89,6 +89,27 @@ uses the same helper, and tapping "加载 KernelSU" once KSU is active re-runs t
 verification instead of re-running the exploit, which would only park another
 zombie. `UserServiceArgs.version` goes 9 → 10.
 
+### 6. vivo tail work, opt-in per device (`0.66`)
+
+OriginOS kills a process on `sys_exit` if its cred was just changed, and keeps a
+`riskdetect` watchdog around; both break `su` right after it starts working.
+The fix is a tail stage, but it must never fire on a ColorOS/other device, so it
+is gated three times:
+
+1. the app sends `TIMER_VIVO=0` unless the device is vivo (or the user forces it
+   on in **vivo 适配** on the details card);
+2. the conf must carry `vivo_disarm = 1`;
+3. the conf must also carry a plausible `sys_exit_tp` (kernel address).
+
+When all three pass, the fake stage zeroes `__tracepoint_sys_exit.funcs`
+(`+0x48`, derived from `vr.ko` relocations) before the worker execs `ksud`, and
+the ksud script runs `stop riskdetect` first. The `funcs` pointer is what the
+tracepoint iterator walks, so a NULL there disables every vendor callback on
+that tracepoint without touching their bookkeeping.
+
+Confs for non-vivo kernels simply do not have those two keys, which is why the
+same binary stays a no-op there.
+
 ### Behaviour differences
 
 | Scenario | Upstream | This branch |

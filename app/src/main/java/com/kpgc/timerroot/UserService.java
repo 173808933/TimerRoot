@@ -25,7 +25,7 @@ import java.util.zip.ZipFile;
 public class UserService extends IUserService.Stub {
 
     /** 服务端版本标记：用来判断当前跑的 UserService 是不是新装的那份。 */
-    private static final String BUILD = "0.65";
+    private static final String BUILD = "0.66";
     private static final String PKG = "com.kpgc.timerroot";
     private static final String BIN = "/data/local/tmp/timer";
     private static final String CONF = "/data/local/tmp/timer.conf";
@@ -47,6 +47,11 @@ public class UserService extends IUserService.Stub {
     private final BlockingQueue<String> rootLines = new LinkedBlockingQueue<>();
     /** 最近一次成功采用的管理器包名，只用于 info() 展示。 */
     private String lastMgr = "";
+    /**
+     * vivo 收尾开关："1" 强制走、"0" 强制跳过、空 = 由 conf 的 vivo_disarm 决定。
+     * 只影响 timer 的 TIMER_VIVO 环境变量；非 vivo 机型传 "0" 就完全等于旧行为。
+     */
+    private String vivoMode = "";
 
     public UserService() {
     }
@@ -160,6 +165,23 @@ public class UserService extends IUserService.Stub {
     }
 
     @Override
+    public String setVivoMode(String mode) {
+        if ("1".equals(mode) || "0".equals(mode)) {
+            vivoMode = mode;
+        } else {
+            vivoMode = "";
+        }
+        return "vivo=" + (vivoMode.isEmpty() ? "conf" : vivoMode);
+    }
+
+    /** 把开关塞进子进程环境；空串表示不下发，交给 conf。 */
+    private void applyVivoEnv(ProcessBuilder pb) {
+        if (!vivoMode.isEmpty()) {
+            pb.environment().put("TIMER_VIVO", vivoMode);
+        }
+    }
+
+    @Override
     public String run(String args) {
         try {
             ProcessBuilder pb = new ProcessBuilder(
@@ -167,6 +189,7 @@ public class UserService extends IUserService.Stub {
                     BIN + " --conf " + CONF + " " + args + " 2>&1");
             pb.directory(new File("/data/local/tmp"));
             pb.redirectErrorStream(true);
+            applyVivoEnv(pb);
             Process p = pb.start();
             String text = readAll(p.getInputStream());
             if (!p.waitFor(90, TimeUnit.SECONDS)) {
@@ -181,7 +204,8 @@ public class UserService extends IUserService.Stub {
     @Override
     public String runDetached(String args) {
         try {
-            String cmd = "cd /data/local/tmp && setsid " + BIN + " --conf " + CONF
+            String env = vivoMode.isEmpty() ? "" : "TIMER_VIVO=" + vivoMode + " ";
+            String cmd = "cd /data/local/tmp && " + env + "setsid " + BIN + " --conf " + CONF
                     + " " + args + " >" + LOG + " 2>&1 </dev/null &";
             Runtime.getRuntime().exec(new String[]{"/system/bin/sh", "-c", cmd});
             Thread.sleep(2000);
@@ -210,6 +234,7 @@ public class UserService extends IUserService.Stub {
             ProcessBuilder pb = new ProcessBuilder(BIN, "--conf", CONF, "shell");
             pb.directory(new File("/data/local/tmp"));
             pb.redirectErrorStream(true);
+            applyVivoEnv(pb);
             rootProcess = pb.start();
             rootInput = new BufferedWriter(
                     new OutputStreamWriter(rootProcess.getOutputStream()));

