@@ -8,8 +8,13 @@ import java.security.PrivateKey;
 import java.security.cert.Certificate;
 import java.util.concurrent.TimeUnit;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import io.github.muntashirakon.adb.AbsAdbConnectionManager;
 import io.github.muntashirakon.adb.AdbStream;
+import io.github.muntashirakon.adb.android.AdbMdns;
 
 /**
  * 本机 adbd 的 ADB 客户端。
@@ -86,6 +91,29 @@ public final class AdbLink extends AbsAdbConnectionManager {
             return "连接失败：" + t;
         }
         return "连接失败：没发现无线调试服务（确认开发者选项里的无线调试已打开）";
+    }
+
+    /**
+     * 找「配对服务」的端口（_adb-tls-pairing._tcp）。
+     * 这个服务只在开发者选项的配对弹窗打开时才广播，所以要在用户输码前后调用。
+     */
+    public static int discoverPairingPort(Context ctx, int seconds) {
+        final AtomicInteger port = new AtomicInteger(-1);
+        final CountDownLatch latch = new CountDownLatch(1);
+        try {
+            AdbMdns mdns = new AdbMdns(ctx.getApplicationContext(),
+                    AdbMdns.SERVICE_TYPE_TLS_PAIRING, (addr, p) -> {
+                        if (p > 0) {
+                            port.set(p);
+                            latch.countDown();
+                        }
+                    });
+            mdns.start();
+            latch.await(seconds, TimeUnit.SECONDS);
+            mdns.stop();
+        } catch (Throwable ignored) {
+        }
+        return port.get();
     }
 
     public boolean ready() {

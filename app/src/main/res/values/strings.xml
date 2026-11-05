@@ -29,6 +29,7 @@
     <string name="adb_run">一键 root + KernelSU</string>
     <string name="adb_su">复验 su</string>
     <string name="adb_drop">断开</string>
+    <string name="adb_manual">手动填端口</string>
 
     <!-- 设备详情 -->
     <string name="detail_title">设备详情</string>

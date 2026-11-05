@@ -6,6 +6,8 @@
     <!-- OTA 链接推导要联网；没有它 HttpURLConnection 直接抛 SecurityException -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 配对码在通知栏里输入（Android 13+ 需要运行时授权） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
 
@@ -23,6 +25,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".adb.PairingReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.kpgc.timerroot.action.PAIR" />
+            </intent-filter>
+        </receiver>
 
         <provider
             android:name="rikka.shizuku.ShizukuProvider"

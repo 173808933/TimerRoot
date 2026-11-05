@@ -42,6 +42,14 @@ import java.util.Locale;
 
 import com.kpgc.timerroot.adb.AdbFlow;
 import com.kpgc.timerroot.adb.AdbLink;
+import com.kpgc.timerroot.adb.PairingNotification;
+import com.kpgc.timerroot.adb.PairingReceiver;
+
+import io.github.muntashirakon.adb.android.AdbMdns;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import rikka.shizuku.Shizuku;
 
@@ -494,7 +502,8 @@ public class MainActivity extends Activity {
 
         TextView hint = new TextView(this);
         hint.setText("不装 Shizuku。开发者选项 → 无线调试 →「使用配对码配对设备」，"
-                + "把弹窗里的端口和 6 位码填进来，连上以后走 mDNS 自动发现。");
+                + "点下面的按钮后从通知栏输入 6 位配对码（和 Shizuku 一样），"
+                + "配对和连接都在后台完成。");
         hint.setTextColor(colorTextWeak);
         hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         hint.setLineSpacing(0f, 1.5f);
@@ -508,7 +517,7 @@ public class MainActivity extends Activity {
         card.addView(adbStatus);
         card.addView(spacer(10));
 
-        card.addView(actionButton(R.string.adb_pair, true, v -> showAdbPairDialog()));
+        card.addView(actionButton(R.string.adb_pair, true, v -> startAdbPairing()));
         card.addView(spacer(10));
         card.addView(secondaryButton(R.string.adb_run, v -> confirmAdbRun()));
         card.addView(spacer(4));
@@ -530,6 +539,11 @@ public class MainActivity extends Activity {
             refreshAdbStatus();
         }).start()), rowParams());
         card.addView(row);
+
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        row2.addView(toolPill(R.string.adb_manual, v -> showAdbPairDialog()), rowParams());
+        card.addView(row2);
 
         return card;
     }
@@ -894,7 +908,28 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        PairingReceiver.UI_LOG = this::addLog;
         refreshDetails();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        if (request == REQ_NOTIF) {
+            if (results.length > 0
+                    && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                startAdbPairing();
+            } else {
+                toast("没有通知权限，改手动填配对码");
+                showAdbPairDialog();
+            }
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        PairingReceiver.UI_LOG = null;
+        super.onPause();
     }
 
     private void applyDetails() {
@@ -1568,6 +1603,29 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private static final int REQ_NOTIF = 0x0A11;
+
+    /**
+     * 配对入口：直接发一条带输入框的通知。
+     *
+     * 顺序很重要 —— 配对服务只在「使用配对码配对设备」弹窗打开时才广播，
+     * 所以不能让用户先回 App 点按钮再回设置。正确姿势和 Shizuku 一样：
+     *   先点这里发通知 → 去开发者选项打开配对弹窗 → 下拉通知栏输码。
+     */
+    private void startAdbPairing() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS},
+                    REQ_NOTIF);
+            toast("请允许通知，配对码要在通知栏里输入");
+            return;
+        }
+        PairingNotification.show(this);
+        addLog("[adb] 已发通知：打开无线调试的「使用配对码配对设备」，"
+                + "然后下拉通知栏输入 6 位码");
     }
 
     private void showAdbPairDialog() {

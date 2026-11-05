@@ -116,10 +116,16 @@ Shizuku was never a permission source; it is just one way to get a shell-domain
 process. The app can also act as an ADB client itself:
 
 - **连接方式** on the details card switches between *Shizuku* and *ADB 直连*.
-- In ADB mode you enter the pairing port and the 6-digit code from
-  *Developer options → Wireless debugging → Pair device with pairing code*.
-  Pairing is SPAKE2 + TLS; the RSA key and self-signed cert live in the app's
-  private directory (`0600`, generated on first use).
+- Pairing follows Shizuku's pattern: the app posts a **notification with an
+  inline input** and you type the 6-digit code from *Developer options →
+  Wireless debugging → Pair device with pairing code* right in the shade. That
+  way the system pairing dialog never leaves the foreground.
+- The port is not entered anywhere: `_adb-tls-pairing._tcp` is discovered over
+  mDNS **after** the code arrives (the service is only advertised while the
+  dialog is open). Pairing itself is SPAKE2 + TLS; the RSA key and self-signed
+  cert live in the app's private directory (`0600`, generated on first use).
+- Declining the notification permission (Android 13+) falls back to the old
+  manual dialog: pairing port + code.
 - The connect port is **not** entered: after pairing, the client discovers
   `_adb-tls-connect._tcp` over mDNS. Ports change per boot, the pairing key does
   not.
