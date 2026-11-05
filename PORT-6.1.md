@@ -18,8 +18,9 @@
 | `6.1.157-android14-11-o-ga43993466696` | realme Neo7 | 实机跑通（shell + KernelSU） |
 | `6.1.141-android14-11-o-g7598c3221214` | realme GT6 | conf 已推导并交叉核对，尚未上机 |
 | `6.1.141-android14-11-o-gffc54a6d2287` | OPPO K12s | 实机跑通（OTA 链接推导 → 提权 → KSU） |
+| `6.1.141-android14-11-o-g6ed3e67335d5` | realme GT5 Pro | conf 已推导（与 GT6 那份 20 个字段里 19 个相同），待上机 |
 
-一个 APK 同时带三份 conf，安装时按 `uname -r` **精确匹配**选一份；匹配不上就
+一个 APK 同时带四份 conf，安装时按 `uname -r` **精确匹配**选一份；匹配不上就
 拒绝启动（不会拿别的内核偏移去写内存）。加机型就是往 `assets/conf/` 里放一份新的。
 
 ## 验证记录（android14-6.1 / 6.1.157，SELinux Enforcing）
