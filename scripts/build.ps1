@@ -23,6 +23,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+# app/libs 下的 jar：kotlinc / javac 编译期要用，d8 也要打进 dex
+$libJars = @(Get-ChildItem (Join-Path $root 'app/libs') -Filter '*.jar' -ErrorAction SilentlyContinue |
+    ForEach-Object { $_.FullName })
 if (-not $Out) { $Out = Join-Path $root 'build' }
 if (-not (Test-Path $Sdk)) { throw "Android SDK not found at $Sdk (pass -Sdk)" }
 
@@ -177,9 +180,7 @@ if ((Test-Path $ktSrc) -and $NoKotlin) {
         $javaExe = Join-Path (Split-Path (Get-Command javac).Source -Parent) 'java.exe'
         $compilerCp = (@($kcJar, $kotlinStdlib, $coroutines, $trove, $anno) |
             Where-Object { $_ }) -join ';'
-        # app/libs 下的 jar 既是编译期依赖，也要打进 dex
-        $libJars = @(Get-ChildItem (Join-Path $root 'app/libs') -Filter '*.jar' -ErrorAction SilentlyContinue |
-            ForEach-Object { $_.FullName })
+        # libJars 在上面统一算过（javac 也要用）
         $refCp = (@($kotlinStdlib, $anno) + $libJars | Where-Object { $_ }) -join ';'
         New-Item -ItemType Directory -Force -Path $kclasses | Out-Null
         Write-Host "kotlinc: $([System.IO.Path]::GetFileName($kcJar))"
@@ -204,7 +205,9 @@ $sources = Get-ChildItem $src, $gen, (Join-Path $work 'stubs') -Recurse -Filter 
     ForEach-Object { $_.FullName -replace '\\', '/' }
 $argfile = Join-Path $work 'sources.txt'
 $sources | Set-Content $argfile -Encoding ascii
-& javac -encoding UTF-8 -source 11 -target 11 -nowarn -classpath $androidJar -d ($classes -replace '\\', '/') "@$argfile"
+$javaCp = (@($androidJar) + $libJars) -join ';'
+if ($kclasses -and (Test-Path $kclasses)) { $javaCp = $javaCp + ';' + $kclasses }
+& javac -encoding UTF-8 -source 11 -target 11 -nowarn -classpath $javaCp -d ($classes -replace '\\', '/') "@$argfile"
 if ($LASTEXITCODE -ne 0) { throw "javac failed" }
 
 # d8

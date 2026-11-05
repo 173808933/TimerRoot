@@ -40,6 +40,9 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
 
+import com.kpgc.timerroot.adb.AdbFlow;
+import com.kpgc.timerroot.adb.AdbLink;
+
 import rikka.shizuku.Shizuku;
 
 import java.lang.reflect.Method;
@@ -80,6 +83,10 @@ public class MainActivity extends Activity {
     private TextView bannerText;
 
     // ---- 主操作区 (C) ----
+    private LinearLayout actionsCard;
+    private LinearLayout adbCard;
+    private TextView adbStatus;
+    private volatile boolean adbReadyCache;
     private TextView actionShellOnlyBtn;
     private TextView actionShellOnlyHint;
     private TextView actionOneTapBtn;
@@ -96,6 +103,7 @@ public class MainActivity extends Activity {
     private TextView detailKsu;
     private TextView detailMgr;
     private TextView detailVivo;
+    private TextView detailLink;
     private TextView detailSelinux;
     private TextView detailSeccomp;
     private TextView detailRootState;
@@ -191,6 +199,7 @@ public class MainActivity extends Activity {
         setContentView(root);
         showTab(0);
         refreshDetails();
+        applyLinkMode();
         addLog("TimerRoot 已就绪");
         if (safePing() && safePermission() == 0) {
             bindService();
@@ -256,7 +265,13 @@ public class MainActivity extends Activity {
         body.addView(spacer(12));
 
         // ---- C 主操作区 ----
-        body.addView(buildActionsCard());
+        actionsCard = buildActionsCard();
+        body.addView(actionsCard);
+        body.addView(spacer(12));
+
+        // ---- C2 ADB 直连（仅 ADB 模式显示） ----
+        adbCard = buildAdbCard();
+        body.addView(adbCard);
         body.addView(spacer(12));
 
         // ---- D 设备详情卡（默认折叠） ----
@@ -463,6 +478,62 @@ public class MainActivity extends Activity {
         return view;
     }
 
+    private LinearLayout buildAdbCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setBackgroundResource(R.drawable.bg_glass_card);
+
+        TextView title = new TextView(this);
+        title.setText("ADB 直连");
+        title.setTextColor(colorTextPrimary);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        card.addView(title);
+        card.addView(spacer(6));
+
+        TextView hint = new TextView(this);
+        hint.setText("不装 Shizuku。开发者选项 → 无线调试 →「使用配对码配对设备」，"
+                + "把弹窗里的端口和 6 位码填进来，连上以后走 mDNS 自动发现。");
+        hint.setTextColor(colorTextWeak);
+        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        hint.setLineSpacing(0f, 1.5f);
+        card.addView(hint);
+        card.addView(spacer(10));
+
+        adbStatus = new TextView(this);
+        adbStatus.setTextColor(colorTextSecondary);
+        adbStatus.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        adbStatus.setText("未连接");
+        card.addView(adbStatus);
+        card.addView(spacer(10));
+
+        card.addView(actionButton(R.string.adb_pair, true, v -> showAdbPairDialog()));
+        card.addView(spacer(10));
+        card.addView(secondaryButton(R.string.adb_run, v -> confirmAdbRun()));
+        card.addView(spacer(4));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.addView(toolPill(R.string.adb_su, v -> new Thread(() -> {
+            String r = AdbFlow.suCheck(this);
+            addLog("[adb] su -c id → " + r);
+        }).start()), rowParams());
+        row.addView(spacerX(8));
+        row.addView(toolPill(R.string.adb_drop, v -> new Thread(() -> {
+            try {
+                AdbLink.get(this).drop();
+                addLog("[adb] 已断开");
+            } catch (Throwable t) {
+                addLog("[adb] 断开失败：" + t);
+            }
+            refreshAdbStatus();
+        }).start()), rowParams());
+        card.addView(row);
+
+        return card;
+    }
+
     private LinearLayout buildDetailsCard() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
@@ -512,6 +583,10 @@ public class MainActivity extends Activity {
         detailVivo = addRow(detailBody, R.string.detail_vivo, "-");
         detailVivo.setText(describeVivo());
         ((View) detailVivo.getParent()).setOnClickListener(v -> showVivoPicker());
+
+        detailLink = addRow(detailBody, R.string.detail_link, "-");
+        detailLink.setText(adbMode() ? "ADB 直连 · 点此更改" : "Shizuku · 点此更改");
+        ((View) detailLink.getParent()).setOnClickListener(v -> showLinkPicker());
 
         card.addView(detailBody);
 
@@ -840,7 +915,17 @@ public class MainActivity extends Activity {
         // ---- A 状态总览 ----
         String summary = "内核 " + System.getProperty("os.version", "?")
                 + " · " + Build.MODEL;
-        if ("active".equals(ksu)) {
+        boolean adb = adbMode();
+        if (detailLink != null) {
+            detailLink.setText(adb ? "ADB 直连 · 点此更改" : "Shizuku · 点此更改");
+        }
+        if (adb) {
+            statusTitle.setText(adbReadyCache ? "ADB 已连接" : "ADB 未连接");
+            statusTitle.setTextColor(adbReadyCache ? colorGreen : colorTextSecondary);
+            statusSubtitle.setText(adbReadyCache
+                    ? "shell 可用 · 无需 Shizuku"
+                    : "开发者选项 → 无线调试 → 配对");
+        } else if ("active".equals(ksu)) {
             statusTitle.setText(R.string.status_rooted);
             statusTitle.setTextColor(colorGreen);
             statusSubtitle.setText("KernelSU 已加载 · su 为 u:r:ksu:s0");
@@ -1433,6 +1518,149 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    /* ---------------------------------------------------------- 连接方式 */
+
+    private static final String PREF_LINK = "link_mode";
+
+    private boolean adbMode() {
+        return "adb".equals(getSharedPreferences("timer", MODE_PRIVATE)
+                .getString(PREF_LINK, "shizuku"));
+    }
+
+    private void setLinkMode(String mode) {
+        getSharedPreferences("timer", MODE_PRIVATE).edit()
+                .putString(PREF_LINK, mode).apply();
+        applyLinkMode();
+        applyDetails();
+    }
+
+    /** 两套 UI 互斥：Shizuku 卡 / ADB 卡只显示一个。 */
+    private void applyLinkMode() {
+        boolean adb = adbMode();
+        if (guideCard != null) {
+            guideCard.setVisibility(adb ? View.GONE : View.VISIBLE);
+        }
+        if (actionsCard != null) {
+            actionsCard.setVisibility(adb ? View.GONE : View.VISIBLE);
+        }
+        if (adbCard != null) {
+            adbCard.setVisibility(adb ? View.VISIBLE : View.GONE);
+        }
+        if (detailLink != null) {
+            detailLink.setText(adb ? "ADB 直连 · 点此更改" : "Shizuku · 点此更改");
+        }
+        refreshAdbStatus();
+    }
+
+    private void showLinkPicker() {
+        final String[] labels = {
+                "Shizuku（装 Shizuku 并授权）",
+                "ADB 直连（不装 Shizuku，用无线调试）"
+        };
+        final String[] vals = {"shizuku", "adb"};
+        new AlertDialog.Builder(this)
+                .setTitle("连接方式")
+                .setSingleChoiceItems(labels, adbMode() ? 1 : 0, (d, w) -> {
+                    d.dismiss();
+                    setLinkMode(vals[w]);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void showAdbPairDialog() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(8), dp(20), 0);
+
+        final EditText pairPort = new EditText(this);
+        pairPort.setHint("配对端口（配对弹窗里的）");
+        pairPort.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        pairPort.setText(getSharedPreferences("timer", MODE_PRIVATE)
+                .getString("adb_pair_port", ""));
+        box.addView(pairPort);
+
+        final EditText code = new EditText(this);
+        code.setHint("6 位配对码");
+        code.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        box.addView(code);
+
+        new AlertDialog.Builder(this)
+                .setTitle("ADB 无线调试配对")
+                .setMessage("配对端口和连接端口不是同一个，都在开发者选项里。")
+                .setView(box)
+                .setPositiveButton("配对并连接", (d, w) -> {
+                    String pp = pairPort.getText().toString().trim();
+                    String cc = code.getText().toString().trim();
+                    getSharedPreferences("timer", MODE_PRIVATE).edit()
+                            .putString("adb_pair_port", pp).apply();
+                    doAdbPair(pp, cc);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void doAdbPair(String pairPort, String code) {
+        final int pp;
+        try {
+            pp = Integer.parseInt(pairPort);
+        } catch (Throwable t) {
+            toast("端口要填数字");
+            return;
+        }
+        addLog("[adb] 开始配对：端口 " + pp);
+        new Thread(() -> {
+            try {
+                AdbLink link = AdbLink.get(this);
+                addLog("[adb] " + link.doPair(pp, code));
+                Thread.sleep(800);
+                addLog("[adb] " + link.doConnect());
+            } catch (Throwable t) {
+                addLog("[adb] 配对异常：" + t);
+            }
+            refreshAdbStatus();
+        }).start();
+    }
+
+    private void confirmAdbRun() {
+        new AlertDialog.Builder(this)
+                .setTitle("一键 root + KernelSU？")
+                .setMessage("通过 ADB shell 跑 /data/local/tmp/timer fake。\n\n"
+                        + "- 约 15 秒，成功后 su 在 u:r:ksu:s0\n"
+                        + "- 父进程会 park，用完重启清理\n"
+                        + "- 运行期间不要操作设备")
+                .setPositiveButton("开始", (d, w) -> new Thread(() -> {
+                    addLog("[adb] 开始一键流程");
+                    String out = AdbFlow.oneTap(this, this::addLog);
+                    addLog("[adb] 结束" + (out.isEmpty() ? "（无日志）" : "，见上面"));
+                    refreshAdbStatus();
+                }).start())
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void refreshAdbStatus() {
+        if (adbStatus == null) {
+            return;
+        }
+        if (!adbMode()) {
+            adbStatus.setText("当前是 Shizuku 模式");
+            adbReadyCache = false;
+            return;
+        }
+        new Thread(() -> {
+            boolean ok;
+            try {
+                ok = AdbLink.get(this).ready();
+            } catch (Throwable t) {
+                ok = false;
+            }
+            adbReadyCache = ok;
+            final boolean f = ok;
+            ui.post(() -> adbStatus.setText(f ? "已连接 · shell 可用" : "未连接（先配对并连接）"));
+        }).start();
     }
 
     private String describeManager() {

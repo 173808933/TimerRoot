@@ -25,6 +25,10 @@
     <string name="action_root">只获取 root Shell</string>
     <string name="action_ksu">一键 root + KernelSU</string>
     <string name="action_stop">停止</string>
+    <string name="adb_pair">配对并连接</string>
+    <string name="adb_run">一键 root + KernelSU</string>
+    <string name="adb_su">复验 su</string>
+    <string name="adb_drop">断开</string>
 
     <!-- 设备详情 -->
     <string name="detail_title">设备详情</string>
@@ -38,6 +42,7 @@
     <string name="detail_root">root 状态</string>
     <string name="detail_manager">管理器</string>
     <string name="detail_vivo">vivo 适配</string>
+    <string name="detail_link">连接方式</string>
 
     <!-- 工具 -->
     <string name="tool_config">配置</string>

@@ -110,6 +110,32 @@ that tracepoint without touching their bookkeeping.
 Confs for non-vivo kernels simply do not have those two keys, which is why the
 same binary stays a no-op there.
 
+### 7. ADB mode: no Shizuku (`0.69`)
+
+Shizuku was never a permission source; it is just one way to get a shell-domain
+process. The app can also act as an ADB client itself:
+
+- **连接方式** on the details card switches between *Shizuku* and *ADB 直连*.
+- In ADB mode you enter the pairing port and the 6-digit code from
+  *Developer options → Wireless debugging → Pair device with pairing code*.
+  Pairing is SPAKE2 + TLS; the RSA key and self-signed cert live in the app's
+  private directory (`0600`, generated on first use).
+- The connect port is **not** entered: after pairing, the client discovers
+  `_adb-tls-connect._tcp` over mDNS. Ports change per boot, the pairing key does
+  not.
+- One tap then deploys `assets/timer` + the matching conf to
+  `/data/local/tmp`, runs `timer --conf timer.conf fake`, polls `timer.log`
+  and finally runs `su -c id`.
+
+The exploit binary and conf are untouched — only the shell provider changed.
+
+Built with [LibADB](https://github.com/MuntashirAkon/libadb-android) 3.1.1
+(pure Java), bcprov/bcpkix 1.81 and spake2-android. This adds ~2 MB to the APK.
+
+Limits: Android 11+ only (wireless debugging is TLS), mDNS must work on the
+ROM (there is no manual host:port TLS path in LibADB), and wireless debugging
+has to be re-enabled after every reboot.
+
 ### Behaviour differences
 
 | Scenario | Upstream | This branch |
