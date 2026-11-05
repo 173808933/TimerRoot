@@ -142,6 +142,26 @@ Limits: Android 11+ only (wireless debugging is TLS), mDNS must work on the
 ROM (there is no manual host:port TLS path in LibADB), and wireless debugging
 has to be re-enabled after every reboot.
 
+### 8. Derive a conf on a PC (`tools/derive/`)
+
+The device can derive its own conf (section 3), but `tools/derive/` does the
+same job on a PC, starting from a `boot.img`, an OTA payload, or a bare
+`Image` — no working device required:
+
+```bash
+pip install capstone numpy
+python tools/derive/cve98260_auto.py boot.img --out profiles/
+```
+
+It prints a verdict (`USABLE` / `INCOMPLETE` / `PATCHED` / `FAIL`) plus
+`<release>.timer.conf`, ready to drop into `app/src/main/assets/conf/`.
+`tools/derive/README.md` documents where every field comes from;
+`tools/derive/PORTING.md` walks through adding a new device.
+
+Verified against four real images. For
+`6.1.141-android14-11-o-g6ed3e67335d5` the generated conf is byte-identical
+to the shipped one apart from the timestamp.
+
 ### Behaviour differences
 
 | Scenario | Upstream | This branch |
