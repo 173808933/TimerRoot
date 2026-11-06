@@ -4,7 +4,10 @@ import android.content.Context;
 import android.os.Build;
 
 import java.io.ByteArrayOutputStream;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.security.PrivateKey;
+import java.util.LinkedHashSet;
 import java.security.cert.Certificate;
 import java.util.concurrent.TimeUnit;
 
@@ -66,17 +69,135 @@ public final class AdbLink extends AbsAdbConnectionManager {
         return "TimerRoot";
     }
 
+    /**
+     * mDNS 报出来的配对端点。
+     *
+     * host 不能写死 127.0.0.1：AOSP 的 pairing server 绑 INADDR_ANY，
+     * loopback 能连；但不少厂商 ROM 只绑 wlan 地址，localhost 直接拒绝。
+     * 这就是「自己手机能配对、别人手机一直失败」的根因。
+     */
+    static final class Endpoint {
+        final String host;
+        final int port;
+
+        Endpoint(String host, int port) {
+            this.host = host == null ? "" : host;
+            this.port = port;
+        }
+
+        @Override
+        public String toString() {
+            return (host.isEmpty() ? "127.0.0.1" : host) + ":" + port;
+        }
+    }
+
+    /** 配对弹窗一打开就盯着，别等用户输完码才去找端口。 */
+    private static volatile AdbMdns pairWatcher;
+    private static volatile Endpoint pairSeen;
+    private static volatile long pairSeenAt;
+
+    public static void startPairWatcher(Context ctx) {
+        stopPairWatcher();
+        try {
+            AdbMdns m = new AdbMdns(ctx.getApplicationContext(),
+                    AdbMdns.SERVICE_TYPE_TLS_PAIRING, (addr, p) -> {
+                        if (p > 0) {
+                            pairSeen = new Endpoint(addr == null ? "" : addr.getHostAddress(), p);
+                            pairSeenAt = System.currentTimeMillis();
+                        }
+                    });
+            m.start();
+            pairWatcher = m;
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static void stopPairWatcher() {
+        AdbMdns m = pairWatcher;
+        pairWatcher = null;
+        if (m != null) {
+            try {
+                m.stop();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** 缓存超过这个时间就当没看见（配对端口每次开弹窗都会变）。 */
+    private static final long PAIR_CACHE_MS = 120_000L;
+
+    /**
+     * 取配对端点：先用 watcher 的缓存，没有再现场找 seconds 秒。
+     * 返回 null 表示没发现服务。
+     */
+    static Endpoint discoverPairing(Context ctx, int seconds) {
+        Endpoint c = pairSeen;
+        if (c != null && System.currentTimeMillis() - pairSeenAt < PAIR_CACHE_MS) {
+            return c;
+        }
+        pairSeen = null;
+        final CountDownLatch latch = new CountDownLatch(1);
+        try {
+            AdbMdns m = new AdbMdns(ctx.getApplicationContext(),
+                    AdbMdns.SERVICE_TYPE_TLS_PAIRING, (addr, p) -> {
+                        if (p > 0) {
+                            pairSeen = new Endpoint(addr == null ? "" : addr.getHostAddress(), p);
+                            pairSeenAt = System.currentTimeMillis();
+                            latch.countDown();
+                        }
+                    });
+            m.start();
+            latch.await(seconds, TimeUnit.SECONDS);
+            m.stop();
+        } catch (Throwable ignored) {
+        }
+        return pairSeen;
+    }
+
+    /** 3 秒内能建立 TCP 就算可达；用来把不可达的候选先筛掉，省得干等。 */
+    private static boolean reachable(String host, int port, int ms) {
+        try (Socket s = new Socket()) {
+            s.connect(new InetSocketAddress(host, port), ms);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     /** 配对端口和配对码都来自「无线调试 → 使用配对码配对设备」那个弹窗。 */
     public String doPair(int port, String code) {
+        return doPair(new Endpoint("", port), code);
+    }
+
+    public String doPair(Endpoint ep, String code) {
         String pre = selfTest(appCtx);
-        try {
-            boolean ok = pair("127.0.0.1", port, code);
-            return (ok ? "配对成功（端口 " + port + "）"
-                    : "配对失败：adbd 拒绝了这次配对（码错/超时/端口不对）")
-                    + "\n自检 " + pre;
-        } catch (Throwable t) {
-            return "配对失败：" + t + "\n自检 " + pre;
+
+        // 候选：loopback 优先（快、多数 ROM 都通），再补 mDNS 报的地址。
+        // IPv6 链路本地地址没有 scope id 连不上，直接跳过。
+        LinkedHashSet<String> hosts = new LinkedHashSet<>();
+        hosts.add("127.0.0.1");
+        if (!ep.host.isEmpty() && !ep.host.contains(":")) {
+            hosts.add(ep.host);
         }
+
+        StringBuilder tried = new StringBuilder();
+        for (String h : hosts) {
+            if (!reachable(h, ep.port, 3000)) {
+                tried.append(h).append(": 不可达；");
+                continue;
+            }
+            try {
+                boolean ok = pair(h, ep.port, code);
+                if (ok) {
+                    return "配对成功（" + h + ":" + ep.port + "）\n自检 " + pre;
+                }
+                tried.append(h).append(": 被拒；");
+            } catch (Throwable t) {
+                tried.append(h).append(": ").append(t.getClass().getSimpleName()).append('；');
+            }
+        }
+        return "配对失败：adbd 拒绝了这次配对（码错/超时/端口不对）\n"
+                + "尝试 " + tried + "\n自检 " + pre;
     }
 
     /**
@@ -122,29 +243,6 @@ public final class AdbLink extends AbsAdbConnectionManager {
             return "连接失败：" + t;
         }
         return "连接失败：没发现无线调试服务（确认开发者选项里的无线调试已打开）";
-    }
-
-    /**
-     * 找「配对服务」的端口（_adb-tls-pairing._tcp）。
-     * 这个服务只在开发者选项的配对弹窗打开时才广播，所以要在用户输码前后调用。
-     */
-    public static int discoverPairingPort(Context ctx, int seconds) {
-        final AtomicInteger port = new AtomicInteger(-1);
-        final CountDownLatch latch = new CountDownLatch(1);
-        try {
-            AdbMdns mdns = new AdbMdns(ctx.getApplicationContext(),
-                    AdbMdns.SERVICE_TYPE_TLS_PAIRING, (addr, p) -> {
-                        if (p > 0) {
-                            port.set(p);
-                            latch.countDown();
-                        }
-                    });
-            mdns.start();
-            latch.await(seconds, TimeUnit.SECONDS);
-            mdns.stop();
-        } catch (Throwable ignored) {
-        }
-        return port.get();
     }
 
     public boolean ready() {

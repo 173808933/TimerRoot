@@ -18,7 +18,7 @@ public class PairingReceiver extends BroadcastReceiver {
 
     public static final String ACTION_PAIR = "com.kpgc.timerroot.action.PAIR";
     public static final String KEY_CODE = "pair_code";
-    private static final int PAIR_TIMEOUT_SEC = 25;
+    private static final int PAIR_TIMEOUT_SEC = 12;
 
     /** Activity 在前台时挂上来收日志；为 null 就只写通知。 */
     public static volatile Consumer<String> UI_LOG;
@@ -42,17 +42,20 @@ public class PairingReceiver extends BroadcastReceiver {
             String pair = "配对异常";
             String conn = "";
             try {
-                // 配对端口只在「使用配对码配对设备」弹窗打开时才广播，这里现找
-                int port = AdbLink.discoverPairingPort(app, PAIR_TIMEOUT_SEC);
-                if (port <= 0) {
-                    pair = "没发现配对服务：确认配对弹窗还开着，再点一次「输入配对码」";
+                // watcher 在点「配对并连接」时就起来了，正常会有缓存；
+                // 没缓存（用户直接开弹窗再输码）才现场等
+                AdbLink.Endpoint ep = AdbLink.discoverPairing(app, PAIR_TIMEOUT_SEC);
+                if (ep == null) {
+                    pair = "没发现配对服务：确认配对弹窗还开着。\n"
+                            + "也可以回 App 点「手动填端口」，填弹窗上显示的那个端口。";
                     PairingNotification.result(app, false, pair);
+                    AdbLink.stopPairWatcher();
                     pending.finish();
                     return;
                 }
-                log("[adb] 配对端口 " + port);
+                log("[adb] 配对端点 " + ep);
                 AdbLink link = AdbLink.get(app);
-                pair = link.doPair(port, code);
+                pair = link.doPair(ep, code);
                 if (pair.startsWith("配对成功")) {
                     Thread.sleep(800);
                     conn = link.doConnect();
@@ -66,6 +69,7 @@ public class PairingReceiver extends BroadcastReceiver {
             }
             PairingNotification.result(app, pair.startsWith("配对成功"),
                     pair + (conn.isEmpty() ? "" : "\n" + conn));
+            AdbLink.stopPairWatcher();
             pending.finish();
         }).start();
     }

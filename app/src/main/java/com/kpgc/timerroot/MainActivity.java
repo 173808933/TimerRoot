@@ -1623,6 +1623,8 @@ public class MainActivity extends Activity {
             toast("请允许通知，配对码要在通知栏里输入");
             return;
         }
+        // 提前盯着 mDNS：用户一打开配对弹窗就能抓到端口，不用等他输完码再等 25 秒
+        AdbLink.startPairWatcher(this);
         PairingNotification.show(this);
         addLog("[adb] 已发通知：打开无线调试的「使用配对码配对设备」，"
                 + "然后下拉通知栏输入 6 位码");
