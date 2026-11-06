@@ -1,6 +1,6 @@
 # TimerRoot
 
-**English** · [**简体中文**](README.zh-CN.md) ← 本分支相对上游的改动、内置机型清单、发布说明都在这里
+**English** · [简体中文](README.zh-CN.md)
 
 Android front end for **CVE-2026-98260** (POSIX CPU timer use-after-free), the
 same class of bug as CVE-2026-64560. One tap gives you a root shell and then
@@ -67,8 +67,8 @@ uninstalling. Now:
 - `setKsuManager(pkg)` writes `/data/local/tmp/ksud.pkg.override`; the prepare
   path consults it first and falls back to auto if that package has no ksud.
   `setKsuManager("auto")` deletes the file.
-- The details card grew a "管理器" row showing `自动 · <pkg>` or
-  `手动 · <pkg>`; tapping it opens the picker.
+- The details card grew a "管理器" (Manager) row showing `自动` (auto) ·
+  `<pkg>` or `手动` (manual) · `<pkg>`; tapping it opens the picker.
 
 `IUserService.aidl` grew two methods, so `UserServiceArgs.version` goes
 8 → 9.
@@ -76,7 +76,7 @@ uninstalling. Now:
 ### 5. KernelSU state is judged by running su (`0.63`)
 
 `suCheck()` used to open with `new File("/system/bin/su").exists()` and bail out
-with "su 不存在" when the file was missing. That check is wrong for every
+with "su 不存在" (su not found) when the file was missing. That check is wrong for every
 KernelSU that ships built-in su: `su_compat` rewrites `execve("/system/bin/su")`
 to a memfd-backed blob inside the kernel (the module carries the
 `install su session fd failed` path), so **the file never exists on disk**. The
@@ -87,9 +87,9 @@ The check is now an actual execution: `su`, `/system/bin/su`,
 `/data/adb/ksu/bin/su` are tried in order, and success means `id` reports
 `uid=0` (the user service itself runs as shell/2000, so nothing else can produce
 it). On failure the first real error is printed instead of a guess. `info()`
-uses the same helper, and tapping "加载 KernelSU" once KSU is active re-runs the
-verification instead of re-running the exploit, which would only park another
-zombie. `UserServiceArgs.version` goes 9 → 10.
+uses the same helper, and tapping "加载 KernelSU" (Load KernelSU) once KSU is
+active re-runs the verification instead of re-running the exploit, which would
+only park another zombie. `UserServiceArgs.version` goes 9 → 10.
 
 ### 6. vivo tail work, opt-in per device (`0.66`)
 
@@ -99,7 +99,7 @@ The fix is a tail stage, but it must never fire on a ColorOS/other device, so it
 is gated three times:
 
 1. the app sends `TIMER_VIVO=0` unless the device is vivo (or the user forces it
-   on in **vivo 适配** on the details card);
+   on in **vivo 适配** (vivo adaptation) on the details card);
 2. the conf must carry `vivo_disarm = 1`;
 3. the conf must also carry a plausible `sys_exit_tp` (kernel address).
 
@@ -117,7 +117,8 @@ same binary stays a no-op there.
 Shizuku was never a permission source; it is just one way to get a shell-domain
 process. The app can also act as an ADB client itself:
 
-- **连接方式** on the details card switches between *Shizuku* and *ADB 直连*.
+- **连接方式** (Connection) on the details card switches between *Shizuku* and
+  *ADB 直连* (ADB direct).
 - Pairing follows Shizuku's pattern: the app posts a **notification with an
   inline input** and you type the 6-digit code from *Developer options →
   Wireless debugging → Pair device with pairing code* right in the shade. That
@@ -292,14 +293,15 @@ the server is **not** running; the exploit cannot start until it is.
 Nothing to press. As soon as Shizuku grants access the app extracts
 `assets/timer` to `/data/local/tmp/timer`, picks the conf whose `release`
 matches `uname -r` exactly, locates `ksud`, and runs `am kill-all; sync`.
-The `准备` pill in Tools only repeats it.
+The `准备` (Prepare) pill in Tools only repeats it.
 
 If the card says `conf=none`, this build has no profile for that kernel: import
 one, or derive it from the OTA link (see above).
 
 ### 4. One tap: root + KernelSU
 
-Press **一键 root + KernelSU**. A single exploit run does the whole job:
+Press **一键 root + KernelSU** (One tap: root + KernelSU). A single exploit
+run does the whole job:
 
 ```
 [+] slide=0x1988600000 (probe)
@@ -317,19 +319,22 @@ via: su
 id: uid=0(root) ... context=u:r:ksu:s0
 ```
 
-The success sheet offers **打开管理器** (grant apps / load modules) and
-**重启设备**.
+The `—— 验证 su ——` line is the script's own separator, printed in Chinese;
+everything below it is the su verification that follows `ksud late-load`.
+
+The success sheet offers **打开管理器** (Open manager — grant apps / load
+modules) and **重启设备** (Reboot).
 
 Why one run instead of two: the fake-cred stage is the only one that ends with
 full capabilities and SELinux permissive, which is exactly what `ksud
 late-load` needs. The old shell-only run is still there as **只获取 root
-Shell** for troubleshooting, but it is no longer a prerequisite — pressing it
-first just parks a second process for nothing.
+Shell** (Shell only) for troubleshooting, but it is no longer a prerequisite —
+pressing it first just parks a second process for nothing.
 
 ### 5. Reboot
 
-Use the `重启设备` button in the success sheet, or the same action when a run
-fails. Rebooting is the only clean way to remove parked processes and unload
+Use the `重启设备` (Reboot) button in the success sheet, or the same action
+when a run fails. Rebooting is the only clean way to remove parked processes and unload
 KernelSU.
 
 After rebooting, start again from step 1: Shizuku is stopped and KernelSU is
