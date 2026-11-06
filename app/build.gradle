@@ -8,10 +8,10 @@ android {
 
     defaultConfig {
         applicationId 'com.kpgc.timerroot'
-        minSdk 30
-        targetSdk 36
-        versionCode 74
-        versionName '0.73-pair'
+        minSdk 29
+        targetSdk 29
+        versionCode 81
+        versionName '0.78-pairing'
     }
 
     buildTypes {

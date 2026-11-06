@@ -196,7 +196,7 @@ $resZip = Join-Path $work 'res.zip'
 $base = Join-Path $work 'base.apk'
 & $aapt2 compile --dir (Join-Path $root 'app/src/main/res') -o $resZip
 & $aapt2 link -o $base -I $androidJar --manifest (Join-Path $root 'app/src/main/AndroidManifest.xml') `
-    -A (Join-Path $root 'app/src/main/assets') --min-sdk-version 30 --target-sdk-version 36 `
+    -A (Join-Path $root 'app/src/main/assets') --min-sdk-version 29 --target-sdk-version 29 `
     --version-code $VersionCode --version-name $VersionName --java ($gen -replace '\\', '/') $resZip
 if ($LASTEXITCODE -ne 0) { throw "aapt2 failed" }
 
@@ -230,7 +230,21 @@ $unsigned = Join-Path $work 'unsigned.apk'
 $aligned = Join-Path $work 'aligned.apk'
 Copy-Item $base $unsigned -Force
 & $jar uf $unsigned -C $dex classes.dex
-& $zipalign -f 4 $unsigned $aligned
+
+# native libs: app/src/main/jniLibs/<abi>/*.so -> lib/<abi>/*.so
+# libadb 的 SPAKE2 走 JNI（Spake2Context 全是 native 方法），少了 .so
+# 配对会在 allocNewContext 处 UnsatisfiedLinkError
+$jniLibs = Join-Path $root 'app/src/main/jniLibs'
+if (Test-Path $jniLibs) {
+    $stage = Join-Path $work 'libstage'
+    if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path (Join-Path $stage 'lib') | Out-Null
+    Copy-Item (Join-Path $jniLibs '*') (Join-Path $stage 'lib') -Recurse -Force
+    & $jar uf $unsigned -C $stage 'lib'
+    if ($LASTEXITCODE -ne 0) { throw "jar uf lib failed" }
+}
+
+& $zipalign -f -p 4 $unsigned $aligned
 
 # Keep the signing key outside build/ so every rebuild stays upgrade-compatible.
 $keystore = Join-Path (Split-Path $PSScriptRoot -Parent) 'keystore/debug.jks'

@@ -2,10 +2,15 @@ package com.kpgc.timerroot.adb;
 
 import android.content.Context;
 import android.os.Build;
+import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.net.Socket;
+import java.util.Collections;
 import java.security.PrivateKey;
 import java.util.LinkedHashSet;
 import java.security.cert.Certificate;
@@ -29,6 +34,8 @@ import io.github.muntashirakon.adb.android.AdbMdns;
  * 只在 App 进程里跑；真正的攻击仍然由 /data/local/tmp/timer 执行，二进制不变。
  */
 public final class AdbLink extends AbsAdbConnectionManager {
+
+    private static final String TAG = "TimerRootAdb";
 
     private static AdbLink instance;
 
@@ -170,6 +177,7 @@ public final class AdbLink extends AbsAdbConnectionManager {
     }
 
     public String doPair(Endpoint ep, String code) {
+        exemptHiddenApi();
         String pre = selfTest(appCtx);
 
         // 候选：loopback 优先（快、多数 ROM 都通），再补 mDNS 报的地址。
@@ -178,6 +186,21 @@ public final class AdbLink extends AbsAdbConnectionManager {
         hosts.add("127.0.0.1");
         if (!ep.host.isEmpty() && !ep.host.contains(":")) {
             hosts.add(ep.host);
+        }
+        // 手动填端口时 ep.host 是空的，mDNS 也可能被 ROM 掐掉；
+        // 把本机所有非 loopback 的 IPv4 都加上，保证还有一条活路
+        try {
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!ni.isUp() || ni.isLoopback()) {
+                    continue;
+                }
+                for (InetAddress ia : Collections.list(ni.getInetAddresses())) {
+                    if (ia instanceof Inet4Address && !ia.isLoopbackAddress()) {
+                        hosts.add(ia.getHostAddress());
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
         }
 
         StringBuilder tried = new StringBuilder();
@@ -206,7 +229,50 @@ public final class AdbLink extends AbsAdbConnectionManager {
      * 0.70 在真机上只回一句 NoClassDefFoundError，看不出是证书生成、
      * BC 的 crypto 还是 SPAKE2 本身坏了。分开探一遍，失败就有明确落点。
      */
+    /**
+     * 打开 hidden API 豁免。
+     *
+     * libadb 的 PairingConnectionCtx 用反射调
+     * {@code Conscrypt.exportKeyingMaterial(SSLSocket, String, byte[], int)}，
+     * 这个方法是 core-platform 的 blocked API，反射一定被拒：
+     *
+     *   hiddenapi: ... api=blocked ... using reflection: denied
+     *
+     * 结果是 TLS 握手成功、SPAKE2 密钥却算不出来，服务端看到的是
+     * SSL_ERROR_SYSCALL + Invalid PairingPacketHeader。
+     *
+     * 走 Class.forName / getDeclaredMethod 这条公开反射链拿到 VMRuntime，
+     * 把所有 hidden API 放开。Shizuku 用的是直接字节码调用（不经过反射
+     * 检查），我们改不了它的 jar，只能从这里绕。
+     */
+    private static volatile boolean hiddenApiTried;
+
+    private static void exemptHiddenApi() {
+        if (hiddenApiTried) {
+            return;
+        }
+        hiddenApiTried = true;
+        try {
+            java.lang.reflect.Method forName =
+                    Class.class.getDeclaredMethod("forName", String.class);
+            java.lang.reflect.Method getDeclaredMethod =
+                    Class.class.getDeclaredMethod("getDeclaredMethod", String.class, Class[].class);
+            Class<?> vmRuntime = (Class<?>) forName.invoke(null, "dalvik.system.VMRuntime");
+            java.lang.reflect.Method getRuntime = (java.lang.reflect.Method)
+                    getDeclaredMethod.invoke(vmRuntime, "getRuntime", new Class<?>[0]);
+            java.lang.reflect.Method setExemptions = (java.lang.reflect.Method)
+                    getDeclaredMethod.invoke(vmRuntime, "setHiddenApiExemptions",
+                            new Class[]{String[].class});
+            Object rt = getRuntime.invoke(null);
+            setExemptions.invoke(rt, (Object) new String[]{"L"});
+            Log.i(TAG, "hidden api exemptions set");
+        } catch (Throwable t) {
+            Log.w(TAG, "hidden api exemption failed: " + t);
+        }
+    }
+
     static String selfTest(Context ctx) {
+        exemptHiddenApi();
         StringBuilder sb = new StringBuilder();
         sb.append("bc=").append(probe("org.bouncycastle.crypto.digests.SHA256Digest"));
         try {
@@ -217,6 +283,13 @@ public final class AdbLink extends AbsAdbConnectionManager {
             sb.append(" cert=FAIL(").append(t).append(')');
         }
         sb.append(" spake2=").append(probe("io.github.muntashirakon.adb.PairingConnectionCtx"));
+        // SPAKE2 是 JNI：libspake2.so 没打进去时这里会直接报 UnsatisfiedLinkError
+        try {
+            System.loadLibrary("spake2");
+            sb.append(" so=ok");
+        } catch (Throwable t) {
+            sb.append(" so=FAIL(").append(t.getClass().getSimpleName()).append(')');
+        }
         return sb.toString();
     }
 

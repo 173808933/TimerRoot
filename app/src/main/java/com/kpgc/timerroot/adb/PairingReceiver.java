@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
+import android.util.Log;
 
 import java.util.function.Consumer;
 
@@ -15,6 +16,8 @@ import java.util.function.Consumer;
  * 这样日志页能直接看到 [adb] 那几行。
  */
 public class PairingReceiver extends BroadcastReceiver {
+
+    private static final String TAG = "TimerRootPair";
 
     public static final String ACTION_PAIR = "com.kpgc.timerroot.action.PAIR";
     public static final String KEY_CODE = "pair_code";
@@ -33,8 +36,10 @@ public class PairingReceiver extends BroadcastReceiver {
         final String code = raw == null ? "" : raw.toString().trim();
         if (code.isEmpty()) {
             log("[adb] 配对码为空");
+            Log.w(TAG, "empty pairing code, intent=" + intent);
             return;
         }
+        Log.i(TAG, "got code len=" + code.length());
 
         final Context app = context.getApplicationContext();
         final PendingResult pending = goAsync();
@@ -44,7 +49,9 @@ public class PairingReceiver extends BroadcastReceiver {
             try {
                 // watcher 在点「配对并连接」时就起来了，正常会有缓存；
                 // 没缓存（用户直接开弹窗再输码）才现场等
+                Log.i(TAG, "discovering pairing endpoint…");
                 AdbLink.Endpoint ep = AdbLink.discoverPairing(app, PAIR_TIMEOUT_SEC);
+                Log.i(TAG, "endpoint=" + ep);
                 if (ep == null) {
                     pair = "没发现配对服务：确认配对弹窗还开着。\n"
                             + "也可以回 App 点「手动填端口」，填弹窗上显示的那个端口。";
@@ -55,13 +62,16 @@ public class PairingReceiver extends BroadcastReceiver {
                 }
                 log("[adb] 配对端点 " + ep);
                 AdbLink link = AdbLink.get(app);
+                Log.i(TAG, "pairing against " + ep);
                 pair = link.doPair(ep, code);
+                Log.i(TAG, "pair result: " + pair);
                 if (pair.startsWith("配对成功")) {
                     Thread.sleep(800);
                     conn = link.doConnect();
                 }
             } catch (Throwable t) {
                 pair = "配对异常：" + t;
+                Log.e(TAG, "pairing failed", t);
             }
             log("[adb] " + pair);
             if (!conn.isEmpty()) {

@@ -194,6 +194,7 @@ python tools/derive/cve98260_auto.py boot.img --out profiles/
 
 | 版本 | versionCode | APK | 大小 | md5 |
 |---|---|---|---|---|
+| `0.78-pairing` | 81 | `TimerRoot-0.78-pairing.apk` | 3,767,817 B | `55b59a9600273098ede1fd62f399df01` |
 | `0.73-pair` | 74 | `TimerRoot-0.73-pair.apk` | 3,681,519 B | `dc1640f040e646c8b3da6a195788b007` |
 | `0.72-tls` | 73 | `TimerRoot-0.72-tls.apk` | 3,681,519 B | `110b93e0acbcffe5bb63404ff6843601` |
 | `0.71-ace6` | 72 | `TimerRoot-0.71-ace6.apk` | 3,951,854 B | `bd64af1e273b766701d6fb10e7dc182f` |
@@ -214,6 +215,7 @@ python tools/derive/cve98260_auto.py boot.img --out profiles/
 | 0.71-ace6 | 内置 Ace6（6.6.118）的 conf；修 derive 在 6.6 上的误判 |
 | 0.72-tls | 自签证书改为纯 JDK 构造，去掉 bcpkix；配对前加三层自检 |
 | 0.73-pair | 配对不再写死 127.0.0.1，用 mDNS 报的地址；提前起 watcher |
+| 0.78-pairing | 配对打通：补 libspake2.so + targetSdk 29 绕过 hidden API |
 
 ---
 
