@@ -2,6 +2,11 @@
 
 [English](README.md) · **简体中文**
 
+**下载**：[最新 Release](https://github.com/173808933/TimerRoot/releases/latest) · [全部版本](https://github.com/173808933/TimerRoot/releases)
+
+> 上游 `kpgc10kai/TimerRoot` 没有发布任何 release，APK 只在这个 fork 里。
+> 如果你从 "forked from …" 点进了上游，看到空的 Releases 是正常的。
+
 > 本文件是 [README.md](README.md) 的中文版，**重点说明本分支相对上游改了什么**。
 > 代码注释、提交信息用中文；文件名、API、日志保持英文。
 

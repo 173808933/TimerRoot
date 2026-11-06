@@ -2,6 +2,12 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
+**Download**: [latest release](https://github.com/173808933/TimerRoot/releases/latest) · [all releases](https://github.com/173808933/TimerRoot/releases)
+
+> The upstream `kpgc10kai/TimerRoot` publishes no releases — APKs live in this fork
+> only. If you followed "forked from …" into the upstream, an empty Releases page
+> is expected.
+
 Android front end for **CVE-2026-98260** (POSIX CPU timer use-after-free), the
 same class of bug as CVE-2026-64560. One tap gives you a root shell and then
 late-loads **KernelSU** (`u:r:ksu:s0`).
