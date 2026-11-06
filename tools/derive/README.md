@@ -74,9 +74,13 @@ pip install lz4           # 只有镜像用 lz4-legacy 压的时候才需要
 
 ## 关键实现点
 
-1. **不被版本号骗**：只看 `begin_new_exec` 里
-   `posix_cpu_timers_exit` 与 `exec_mmap` 写锁的**先后**，以及符号表里有没有
-   补丁新增的 `posixtimer_exec`。
+1. **不被版本号骗**：只看 `begin_new_exec` 里 `posix_cpu_timers_exit` 与
+   `exec_mmap` 的**先后**，以及符号表里有没有补丁新增的 `posixtimer_exec`。
+   分界线的取法随内核版本变：6.1 及更早 `exec_mmap()` 是内联的，函数体里直接
+   能看到 mmap 写锁，就用那个 `down_write_killable`；6.6+ 它是独立函数，必须用
+   `bl exec_mmap` 的位置当分界——否则会在函数后段抓到另一个
+   `down_write_killable`（6.6.118 在 +0x758，前面紧跟 `exec_mm_release`），
+   把「timer 清理在 mm 切换之后」误判成「早于写锁 ⇒ 已修补」。
 2. **call site 靠扫、不写死**：
    `do_timer_create` 里第一条目标为 `kmem_cache_alloc` 的 `bl`，返回地址即 `timer_link`；
    `prepare_creds` 同理（返回 `+0x20`，**不是**上游写死的 `+0x24`）；

@@ -242,22 +242,42 @@ def analyse(path, outdir=None):
     if lock is None:
         lock = pos("mmap_write_lock_killable")
     pe = pos("posix_cpu_timers_exit")
+    em = pos("exec_mmap")
     r["patch"] = {
         "posixtimer_exec": "posixtimer_exec" in sym,
         "posix_cpu_timers_exit_off": pe,
+        "exec_mmap_off": em,
         "exec_mmap_lock_off": lock,
     }
     if r["patch"]["posixtimer_exec"]:
         r["verdict"] = "PATCHED"
         r["notes"].append("符号表里存在 posixtimer_exec ⇒ 补丁已回填")
         return r
-    if pe is None or lock is None:
-        r["notes"].append("begin_new_exec 里找不到判定所需的调用（可能被内联/改名）")
+    if pe is None:
+        r["notes"].append("begin_new_exec 里找不到 posix_cpu_timers_exit（可能被内联/改名）")
         r["verdict"] = "INCOMPLETE"
         return r
-    if pe < lock:
+
+    # 分界线取哪个，取决于 exec_mmap 有没有被内联：
+    #   6.1 及更早：exec_mmap() 内联进 begin_new_exec，mmap 写锁直接出现在函数体里，
+    #               用那个 down_write_killable 当分界。
+    #   6.6+：exec_mmap() 是独立函数（函数体里出现 bl exec_mmap），它自己的锁在
+    #         它内部，begin_new_exec 里后来出现的 down_write_killable 属于另一段
+    #         逻辑（见 6.6.118 的 +0x758，前面紧跟着 exec_mm_release）。
+    #         拿它当分界会把「timer 清理在 mm 切换之后」误判成「早于写锁 ⇒ 已修补」。
+    if em is not None:
+        boundary, label = em, "exec_mmap()"
+    elif lock is not None:
+        boundary, label = lock, "exec_mmap 写锁"
+    else:
+        r["notes"].append("begin_new_exec 里既没有 exec_mmap 也没有 mmap 写锁")
+        r["verdict"] = "INCOMPLETE"
+        return r
+
+    if pe < boundary:
         r["verdict"] = "PATCHED"
-        r["notes"].append("posix_cpu_timers_exit(%.3x) 早于 exec_mmap 写锁(%.3x) ⇒ 已修补" % (pe, lock))
+        r["notes"].append(
+            "posix_cpu_timers_exit(%.3x) 早于 %s(%.3x) ⇒ 已修补" % (pe, label, boundary))
         return r
 
     # ---- ② 三个 call site
@@ -475,11 +495,14 @@ def fmt(r):
             c.get("CONFIG_CFI_CLANG"), c.get("CONFIG_DEBUG_LIST")))
     if r.get("patch"):
         p = r["patch"]
+        em = p.get("exec_mmap_off")
         L.append("  98260     %s" % (
             "已修补" if r["verdict"] == "PATCHED" else "未修补") +
-            "   (posix_cpu_timers_exit=%s, exec_mmap 锁=%s, posixtimer_exec=%s)" % (
+            "   (timer_exit=%s, %s=%s, posixtimer_exec=%s)" % (
             hex(p["posix_cpu_timers_exit_off"]) if p["posix_cpu_timers_exit_off"] is not None else "-",
-            hex(p["exec_mmap_lock_off"]) if p["exec_mmap_lock_off"] is not None else "-",
+            "exec_mmap" if em is not None else "写锁",
+            hex(em) if em is not None else
+            (hex(p["exec_mmap_lock_off"]) if p["exec_mmap_lock_off"] is not None else "-"),
             "有" if p["posixtimer_exec"] else "无"))
     if r.get("structs"):
         s = r["structs"]
