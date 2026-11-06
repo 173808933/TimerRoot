@@ -152,7 +152,7 @@ python tools/derive/cve98260_auto.py boot.img --out profiles/
 
 ---
 
-## 内置的 4 份 conf
+## 内置的 5 份 conf
 
 装好即用，按 `uname -r` **精确匹配**选一份；匹配不上就拒绝启动。
 
@@ -162,6 +162,7 @@ python tools/derive/cve98260_auto.py boot.img --out profiles/
 | `6.1.141-android14-11-o-g7598c3221214` | realme GT6 | conf 已核对，未上机 | `5f2af76f2f7f4ea6a9c049856f0eaede` |
 | `6.1.141-android14-11-o-gffc54a6d2287` | OPPO K12s | 实机跑通（纯 OTA 推导） | `9899848234c8c0ff8e56ce4d036d3fb5` |
 | `6.1.141-android14-11-o-g6ed3e67335d5` | realme GT5 Pro | conf 已推导，未上机 | `5524be65f454a10c72ea8efe73ba12c2` |
+| `6.6.118-android15-8-g9bc34d5b0c79-abogki537459655-4k` | OPPO Ace6 | conf 已推导，未上机 | `fa4feeec40599b61e439b0f93119a870` |
 
 没有你的机型？用第 3 条（设备端）或第 8 条（PC 端）自己生成一份。
 
@@ -193,6 +194,7 @@ python tools/derive/cve98260_auto.py boot.img --out profiles/
 
 | 版本 | versionCode | APK | 大小 | md5 |
 |---|---|---|---|---|
+| `0.71-ace6` | 72 | `TimerRoot-0.71-ace6.apk` | 3,951,854 B | `bd64af1e273b766701d6fb10e7dc182f` |
 | `0.70-paircode` | 71 | `TimerRoot-0.70-paircode.apk` | 3,951,738 B | `f96cd302e16dbe994735b03101293c9b` |
 
 版本推进（0.63 起）：
@@ -207,6 +209,7 @@ python tools/derive/cve98260_auto.py boot.img --out profiles/
 | 0.68 | 内置 GT5 Pro conf |
 | 0.69-adb | 内置 ADB 客户端 |
 | 0.70-paircode | 配对码移到通知栏 |
+| 0.71-ace6 | 内置 Ace6（6.6.118）的 conf；修 derive 在 6.6 上的误判 |
 
 ---
 
