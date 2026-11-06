@@ -2,16 +2,10 @@ package com.kpgc.timerroot.adb;
 
 import android.content.Context;
 
-import org.bouncycastle.asn1.x500.X500Name;
-import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
-import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
-import org.bouncycastle.operator.ContentSigner;
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
-
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.math.BigInteger;
 import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -19,7 +13,6 @@ import java.security.PrivateKey;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
-import java.util.Date;
 
 /**
  * ADB 客户端身份：一把 RSA-2048 私钥 + 一张自签证书。
@@ -69,16 +62,15 @@ final class AdbKeyStore {
         kpg.initialize(2048);
         KeyPair kp = kpg.generateKeyPair();
 
-        X500Name dn = new X500Name("CN=TimerRoot");
         long now = System.currentTimeMillis();
-        Date from = new Date(now - 24L * 3600 * 1000);
-        Date to = new Date(now + 3650L * 24 * 3600 * 1000);
-        JcaX509v3CertificateBuilder b = new JcaX509v3CertificateBuilder(
-                dn, BigInteger.valueOf(now), from, to, dn, kp.getPublic());
-        ContentSigner signer = new JcaContentSignerBuilder("SHA256withRSA")
-                .build(kp.getPrivate());
-        X509Certificate cert = new JcaX509CertificateConverter()
-                .getCertificate(b.build(signer));
+        // BouncyCastle 的 JcaContentSignerBuilder 在真机上被 ART 判成 erroneous class
+        // （NoClassDefFoundError），改用自己拼的 DER，见 SelfSignedCert。
+        byte[] der = SelfSignedCert.build("TimerRoot", kp,
+                now - 24L * 3600 * 1000,
+                now + 3650L * 24 * 3600 * 1000);
+        X509Certificate cert = (X509Certificate) CertificateFactory
+                .getInstance("X.509")
+                .generateCertificate(new ByteArrayInputStream(der));
 
         write(kf, kp.getPrivate().getEncoded());
         write(cf, cert.getEncoded());

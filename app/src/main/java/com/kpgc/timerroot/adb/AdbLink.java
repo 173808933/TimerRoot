@@ -68,12 +68,43 @@ public final class AdbLink extends AbsAdbConnectionManager {
 
     /** 配对端口和配对码都来自「无线调试 → 使用配对码配对设备」那个弹窗。 */
     public String doPair(int port, String code) {
+        String pre = selfTest(appCtx);
         try {
             boolean ok = pair("127.0.0.1", port, code);
-            return ok ? "配对成功（端口 " + port + "）"
-                    : "配对失败：adbd 拒绝了这次配对（码错/超时/端口不对）";
+            return (ok ? "配对成功（端口 " + port + "）"
+                    : "配对失败：adbd 拒绝了这次配对（码错/超时/端口不对）")
+                    + "\n自检 " + pre;
         } catch (Throwable t) {
-            return "配对失败：" + t;
+            return "配对失败：" + t + "\n自检 " + pre;
+        }
+    }
+
+    /**
+     * 配对前自检：把三层单独报出来。
+     *
+     * 0.70 在真机上只回一句 NoClassDefFoundError，看不出是证书生成、
+     * BC 的 crypto 还是 SPAKE2 本身坏了。分开探一遍，失败就有明确落点。
+     */
+    static String selfTest(Context ctx) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("bc=").append(probe("org.bouncycastle.crypto.digests.SHA256Digest"));
+        try {
+            AdbKeyStore ks = AdbKeyStore.load(ctx);
+            sb.append(" cert=").append(ks.cert.getPublicKey().getAlgorithm())
+                    .append('/').append(ks.cert.getSubjectX500Principal().getName());
+        } catch (Throwable t) {
+            sb.append(" cert=FAIL(").append(t).append(')');
+        }
+        sb.append(" spake2=").append(probe("io.github.muntashirakon.adb.PairingConnectionCtx"));
+        return sb.toString();
+    }
+
+    private static String probe(String cls) {
+        try {
+            Class.forName(cls);
+            return "ok";
+        } catch (Throwable t) {
+            return "FAIL(" + t.getClass().getSimpleName() + ')';
         }
     }
 

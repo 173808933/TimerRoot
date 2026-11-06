@@ -145,7 +145,11 @@ process. The app can also act as an ADB client itself:
 The exploit binary and conf are untouched — only the shell provider changed.
 
 Built with [LibADB](https://github.com/MuntashirAkon/libadb-android) 3.1.1
-(pure Java), bcprov/bcpkix 1.81 and spake2-android. This adds ~2 MB to the APK.
+(pure Java), bcprov 1.81 (LibADB's SPAKE2 needs its `crypto` package) and
+spake2-android. The self-signed client certificate is built by hand
+(`SelfSignedCert`, ~140 lines of DER) instead of bcpkix: on-device, ART
+rejected `JcaContentSignerBuilder` and pairing died with
+`NoClassDefFoundError`. Dropping bcpkix also removed 270 KB from the APK.
 
 Limits: Android 11+ only (wireless debugging is TLS), mDNS must work on the
 ROM (there is no manual host:port TLS path in LibADB), and wireless debugging
