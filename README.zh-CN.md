@@ -1,5 +1,7 @@
 # TimerRoot（中文自述）
 
+[English](README.md) · **简体中文**
+
 > 本文件是 [README.md](README.md) 的中文版，**重点说明本分支相对上游改了什么**。
 > 代码注释、提交信息用中文；文件名、API、日志保持英文。
 

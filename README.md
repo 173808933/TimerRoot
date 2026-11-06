@@ -1,5 +1,7 @@
 # TimerRoot
 
+**English** · [**简体中文**](README.zh-CN.md) ← 本分支相对上游的改动、内置机型清单、发布说明都在这里
+
 Android front end for **CVE-2026-98260** (POSIX CPU timer use-after-free), the
 same class of bug as CVE-2026-64560. One tap gives you a root shell and then
 late-loads **KernelSU** (`u:r:ksu:s0`).
