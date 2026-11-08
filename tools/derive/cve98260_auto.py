@@ -281,15 +281,39 @@ def analyse(path, outdir=None):
         return r
 
     # ---- ② 三个 call site
-    def alloc_site(func, want_alloc="kmem_cache_alloc"):
-        for off, ret, nm in disasm_calls(img, sym, base, func, span=0x1600):
-            if nm == want_alloc or nm.startswith(want_alloc):
-                return ret, off, nm
+    #
+    # span 不能用拍脑袋的固定值：函数长度随版本/编译器差很多（6.1.145 的
+    # copy_process 只有 0xc68，而 task_struct 的分配被放进了 dup_task_struct）。
+    # 这里用「下一个符号的地址」当函数边界，再按 callee 名优先级挑选。
+    def func_span(func, cap=0x20000):
+        a = sym.get(func)
+        if not a:
+            return 0
+        nxt = min((v for v in sym.values() if v > a), default=a + cap)
+        return min(nxt - a, cap)
+
+    def alloc_site(func, wants=("kmem_cache_alloc",)):
+        sp = func_span(func)
+        if not sp:
+            return None, None, None
+        calls = disasm_calls(img, sym, base, func, span=sp)
+        for want in wants:
+            for off, ret, nm in calls:
+                if nm == want or nm.startswith(want):
+                    return ret, off, nm
         return None, None, None
 
-    timer_ret, timer_off, timer_nm = alloc_site("do_timer_create")
-    cred_ret, cred_off, cred_nm = alloc_site("prepare_creds")
-    task_ret, task_off, task_nm = alloc_site("copy_process", "kmem_cache_alloc_node")
+    alloc = ("kmem_cache_alloc",)
+    node = ("kmem_cache_alloc_node", "kmem_cache_alloc")
+    timer_ret, timer_off, timer_nm = alloc_site("do_timer_create", alloc)
+    cred_ret, cred_off, cred_nm = alloc_site("prepare_creds", alloc)
+    task_func = "copy_process"
+    task_ret, task_off, task_nm = alloc_site("copy_process", node)
+    if not task_ret:
+        # 6.1.145 起 task_struct 的分配被搬进 dup_task_struct（copy_process
+        # 里只剩 bl dup_task_struct），分配点仍然唯一，落到这里取。
+        task_ret, task_off, task_nm = alloc_site("dup_task_struct", node)
+        task_func = "dup_task_struct"
     if not timer_ret:
         r["notes"].append("do_timer_create 里找不到 kmem_cache_alloc")
         r["verdict"] = "INCOMPLETE"
@@ -297,8 +321,13 @@ def analyse(path, outdir=None):
     r["sites"] = {
         "timer": {"ret": timer_ret, "in_func_off": timer_off, "callee": timer_nm},
         "cred": {"ret": cred_ret, "in_func_off": cred_off, "callee": cred_nm},
-        "task": {"ret": task_ret, "in_func_off": task_off, "callee": task_nm},
+        "task": {"ret": task_ret, "in_func_off": task_off, "callee": task_nm,
+                 "func": task_func},
     }
+    if not task_ret:
+        r["notes"].append("copy_process/dup_task_struct 里找不到 task_struct 分配点")
+        r["verdict"] = "INCOMPLETE"
+        return r
 
     # ---- ③ 结构体
     st = btf_structs(img, {
@@ -449,7 +478,7 @@ def analyse(path, outdir=None):
     t.append("")
     t.append("# task_struct / cred 布局（BTF）")
     t.append("task_cred_off = %s" % hx(off["task_cred"]))
-    t.append("# copy_process 里 bl kmem_cache_alloc_node(task_struct) 的返回地址低 21 位")
+    t.append("# copy_process/dup_task_struct 里 bl kmem_cache_alloc_node(task_struct) 的返回地址低 21 位")
     t.append("copy_process_low21 = %s" % hx(task_ret & 0x1FFFFF))
     t.append("task_alloc_bytes = %s" % hx(off["task_struct_size"]))
     t.append("")
@@ -517,7 +546,9 @@ def fmt(r):
                 r["sites"]["cred"]["ret"], "prepare_creds", r["sites"]["cred"]["in_func_off"]))
         if r["sites"]["task"]["ret"]:
             L.append("            task =%#x (%s+%#x)" % (
-                r["sites"]["task"]["ret"], "copy_process", r["sites"]["task"]["in_func_off"]))
+                r["sites"]["task"]["ret"],
+                r["sites"]["task"].get("func", "copy_process"),
+                r["sites"]["task"]["in_func_off"]))
     for n in r.get("notes") or []:
         L.append("  说明      %s" % n)
     if r.get("profile_path"):
