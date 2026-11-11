@@ -25,10 +25,20 @@ import java.util.zip.ZipFile;
 public class UserService extends IUserService.Stub {
 
     /** 服务端版本标记：用来判断当前跑的 UserService 是不是新装的那份。 */
-    private static final String BUILD = "0.76";
+    private static final String BUILD = "0.79";
     private static final String PKG = "com.kpgc.timerroot";
     private static final String BIN = "/data/local/tmp/timer";
+    /** 默认 conf 路径；实际使用 confPath，写入失败时会换成备用名。 */
     private static final String CONF = "/data/local/tmp/timer.conf";
+    /**
+     * 当前实际生效的 conf 路径。
+     *
+     * 不能写死常量：/data/local/tmp 是全局目录，timer.conf 可能被别的身份
+     * （比如某次用 root 跑出来的）创建成只读或别的属主。这时 shell 打开它
+     * 会直接 EACCES，而目录本身是可写的 —— 删掉重建就行。删不掉就退到
+     * 一个带 pid 的备用文件名，保证流程能继续。
+     */
+    private volatile String confPath = CONF;
     /** 导入的 conf 放这里：shell 可写，且重启后还在（不像 filesDir 只属于 app）。 */
     private static final String CONFDIR = "/data/local/tmp/conf.d";
     private static final String LOG = "/data/local/tmp/timer.log";
@@ -149,10 +159,7 @@ public class UserService extends IUserService.Stub {
                             + " 匹配的配置；内置 " + (builtinSeen == null ? "无" : builtinSeen)
                             + "，可用「导入配置」补一份）";
                 }
-                try (FileOutputStream out = new FileOutputStream(CONF)) {
-                    out.write(fallbackData);
-                }
-                new File(CONF).setReadable(true, false);
+                confPath = writeConf(fallbackData);
             }
             String carried = backupPreviousLog();
             return "已安装 " + new File(BIN).length() + " 字节，release=" + release
@@ -186,7 +193,7 @@ public class UserService extends IUserService.Stub {
         try {
             ProcessBuilder pb = new ProcessBuilder(
                     "/system/bin/sh", "-c",
-                    BIN + " --conf " + CONF + " " + args + " 2>&1");
+                    BIN + " --conf " + confPath + " " + args + " 2>&1");
             pb.directory(new File("/data/local/tmp"));
             pb.redirectErrorStream(true);
             applyVivoEnv(pb);
@@ -205,7 +212,7 @@ public class UserService extends IUserService.Stub {
     public String runDetached(String args) {
         try {
             String env = vivoMode.isEmpty() ? "" : "TIMER_VIVO=" + vivoMode + " ";
-            String cmd = "cd /data/local/tmp && " + env + "setsid " + BIN + " --conf " + CONF
+            String cmd = "cd /data/local/tmp && " + env + "setsid " + BIN + " --conf " + confPath
                     + " " + args + " >" + LOG + " 2>&1 </dev/null &";
             Runtime.getRuntime().exec(new String[]{"/system/bin/sh", "-c", cmd});
             Thread.sleep(2000);
@@ -231,7 +238,7 @@ public class UserService extends IUserService.Stub {
             return "root Shell 已经打开";
         }
         try {
-            ProcessBuilder pb = new ProcessBuilder(BIN, "--conf", CONF, "shell");
+            ProcessBuilder pb = new ProcessBuilder(BIN, "--conf", confPath, "shell");
             pb.directory(new File("/data/local/tmp"));
             pb.redirectErrorStream(true);
             applyVivoEnv(pb);
@@ -896,6 +903,51 @@ public class UserService extends IUserService.Stub {
     }
 
     /** Shell output without the "unknown" placeholder execOut uses. */
+    /**
+     * 把 conf 落到磁盘，并返回真正生效的路径。
+     *
+     * 关键点：FileOutputStream 不会先删旧文件。目标已存在且不可写时
+     * （只读、或属主是 root）会抛 FileNotFoundException/EACCES，这是
+     * "安装失败：open failed: EACCES" 的唯一成因。所以这里：
+     *   1) 先删；删不掉用 sh -c rm -f 再删
+     *   2) 删完还写不进去，就换 /data/local/tmp/timer.<pid>.conf
+     * 三条路径都会把文件设成 world-readable，保证 timer 进程（shell）能读。
+     */
+    private String writeConf(byte[] data) throws IOException {
+        IOException last = null;
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            File target = new File(CONF);
+
+            if (target.exists()) {
+                if (!target.delete()) {
+                    shell("rm -f " + CONF + " 2>&1");
+                }
+            }
+            try (FileOutputStream out = new FileOutputStream(target)) {
+                out.write(data);
+                out.getFD().sync();
+            } catch (IOException e) {
+                last = e;
+                shell("rm -f " + CONF + " 2>&1");
+                continue;
+            }
+            target.setReadable(true, false);
+            return CONF;
+        }
+
+        File alt = new File("/data/local/tmp/timer."
+                + android.os.Process.myPid() + ".conf");
+        try (FileOutputStream out = new FileOutputStream(alt)) {
+            out.write(data);
+            out.getFD().sync();
+        }
+        alt.setReadable(true, false);
+        android.util.Log.w("TimerRoot", "timer.conf 不可写（" + last
+                + "），改用 " + alt);
+        return alt.getAbsolutePath();
+    }
+
     private String shell(String cmd) {
         try {
             ProcessBuilder pb = new ProcessBuilder("/system/bin/sh", "-c", cmd);

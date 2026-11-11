@@ -2199,8 +2199,9 @@ public class MainActivity extends Activity {
                  * 8 -> 9：ksuManagers / setKsuManager
                  * 9 -> 10：内建 su 的验证方式（不再看 /system/bin/su 是否存在）
                  * 10 -> 11：setVivoMode（vivo 收尾开关）
+                 * 11 -> 12：writeConf 先删再写（修 timer.conf EACCES）
                  */
-                .version(11);
+                .version(12);
     }
 
     /** 当前 UI 上的全部日志（导出和复制都用它）。 */
