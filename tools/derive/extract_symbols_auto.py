@@ -170,7 +170,9 @@ def try_layout(num_syms, names_start, label):
     p = names_start
     for _ in range(num_syms):
         ln = data[p]
-        if ln == 0 or ln > 64:
+        # 128 而不是 64：5.15.180（Find N3 Flip）里最长符号名 81 字节，
+        # 实际有 7 个超过 64，卡 64 会把整份布局判死。
+        if ln == 0 or ln >= 0x80:
             return None
         p += 1 + ln
     try:
@@ -208,7 +210,7 @@ assert offsets_off >= 0, "offsets_off 为负：num_syms 不合理"
 p = names_start
 for _ in range(num_syms):
     ln = data[p]
-    if ln == 0 or ln > 64:
+    if ln == 0 or ln >= 0x80:
         raise SystemExit(f"implausible name length {ln} at {p:#x} (names_start wrong?)")
     p += 1 + ln
 names_end = p
