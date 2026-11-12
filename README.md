@@ -26,8 +26,8 @@ code paths stay untouched for devices that don't use these features.
 - `native/timer.c` (2.6k lines) and `native/build.sh`: a 6.1 port of the
   POSIX-timer exploit, driven entirely by a text profile instead of hard-coded
   offsets.
-- Ships five profiles under `app/src/main/assets/conf/`, one per kernel
-  release (6.1.157, three 6.1.141 builds and one 6.6.118). The file name *is* the release;
+- Ships six profiles under `app/src/main/assets/conf/`, one per kernel
+  release (two 6.1.157 builds, three 6.1.141 builds and one 6.6.118). The file name *is* the release;
   the app picks the one that matches `uname -r` exactly and refuses to start
   on a kernel it has no profile for.
 - `UserService.java` gains `rootdExec()` / `suCheck()` / `exportLog()` so one

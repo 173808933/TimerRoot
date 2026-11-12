@@ -152,13 +152,14 @@ python tools/derive/cve98260_auto.py boot.img --out profiles/
 
 ---
 
-## 内置的 5 份 conf
+## 内置的 6 份 conf
 
 装好即用，按 `uname -r` **精确匹配**选一份；匹配不上就拒绝启动。
 
 | release | 设备 | 状态 | md5 |
 |---|---|---|---|
 | `6.1.157-android14-11-o-ga43993466696` | realme Neo7 | 实机跑通 | `a56caf2536534002c0304074859aef30` |
+| `6.1.157-android14-11-o-g78ff3c4bea38` | OPPO Find X7 Ultra（ColorOS 17） | conf 已推导，未上机 | `7b1c035e93678f361bc65f5f083383a6` |
 | `6.1.141-android14-11-o-g7598c3221214` | realme GT6 | conf 已核对，未上机 | `5f2af76f2f7f4ea6a9c049856f0eaede` |
 | `6.1.141-android14-11-o-gffc54a6d2287` | OPPO K12s | 实机跑通（纯 OTA 推导） | `9899848234c8c0ff8e56ce4d036d3fb5` |
 | `6.1.141-android14-11-o-g6ed3e67335d5` | realme GT5 Pro | conf 已推导，未上机 | `5524be65f454a10c72ea8efe73ba12c2` |
