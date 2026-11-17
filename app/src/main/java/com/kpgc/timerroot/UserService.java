@@ -25,7 +25,7 @@ import java.util.zip.ZipFile;
 public class UserService extends IUserService.Stub {
 
     /** 服务端版本标记：用来判断当前跑的 UserService 是不是新装的那份。 */
-    private static final String BUILD = "0.80";
+    private static final String BUILD = "0.83";
     private static final String PKG = "com.kpgc.timerroot";
     private static final String BIN = "/data/local/tmp/timer";
     /** 默认 conf 路径；实际使用 confPath，写入失败时会换成备用名。 */
@@ -479,16 +479,37 @@ public class UserService extends IUserService.Stub {
             if (!dir.isDirectory() && !dir.mkdirs()) {
                 return "导入失败：建不了目录 " + CONFDIR;
             }
+            /*
+             * 0.81：conf.d 可能是之前 uid 0 提权时建的，owner 变成 root、
+             * mode 0700/0755。本进程是 Shizuku 拉起的 uid 2000，既不是 owner
+             * 也不是 group，open(O_WRONLY) 直接 EACCES——这就是日志里
+             * `conf.d/xxx.conf: open failed: EACCES` 的来源，而且目录躺在
+             * /data 分区，重启也不会消失，所以每次导入都撞同一堵墙。
+             * 父目录 /data/local/tmp 的 owner 是 shell，删得掉这个子目录，
+             * 所以先重建再写。
+             */
+            if (!dir.canWrite()) {
+                String why = rebuildConfDir();
+
+                if (why != null) {
+                    return "导入失败：" + why;
+                }
+            }
             String safe = (name == null || name.trim().isEmpty() ? rel : name.trim())
                     .replaceAll("[^A-Za-z0-9._-]", "_");
             if (!safe.endsWith(".conf")) {
                 safe += ".conf";
             }
             File out = new File(dir, safe);
-            try (FileOutputStream fo = new FileOutputStream(out)) {
-                fo.write(text.getBytes("UTF-8"));
+            if (!writeConfText(out, text)) {
+                /* 目录能写但文件写不进：旧文件是 root 建的，或目录刚被改回权限 */
+                String why = rebuildConfDir();
+
+                if (why != null || !writeConfText(out, text)) {
+                    return "导入失败：写不进 " + out
+                            + (why != null ? "（" + why + "）" : "，重建目录后仍然失败");
+                }
             }
-            out.setReadable(true, false);
             String uname = execOut("uname -r").trim();
             boolean match = rel.equals(uname);
             return "已导入 " + out.getAbsolutePath() + "（" + out.length() + " 字节）\n"
@@ -498,6 +519,54 @@ public class UserService extends IUserService.Stub {
         } catch (Throwable t) {
             return "导入失败：" + t;
         }
+    }
+
+    /** 0.81：把文本写进 conf 文件。成功返回 true，任何异常都当失败。 */
+    private static boolean writeConfText(File f, String text) {
+        try (FileOutputStream fo = new FileOutputStream(f)) {
+            fo.write(text.getBytes("UTF-8"));
+            f.setReadable(true, false);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * 0.81：重建 /data/local/tmp/conf.d。
+     *
+     * 触发场景：目录是提权后 uid 0 的进程建的，owner=root，Shizuku 的 uid 2000
+     * 写不进去。重建之所以可行，是因为父目录 /data/local/tmp 的 owner 是 shell，
+     * 删子目录只看父目录的 w 权限，跟子目录自己的 owner 无关。
+     *
+     * 能读就先 cp 到 .bak，删干净重建，再把 .conf 搬回来；搬不回来也不报错，
+     * 因为原目录本来就可能读不到。
+     *
+     * @return null 表示成功，否则是给人看的原因
+     */
+    private String rebuildConfDir() {
+        String bak = CONFDIR + ".bak";
+
+        shell("rm -rf " + bak + " 2>/dev/null");
+        shell("cp -r " + CONFDIR + " " + bak + " 2>/dev/null");
+        shell("rm -rf " + CONFDIR + " 2>/dev/null");
+        File dir = new File(CONFDIR);
+        boolean made = dir.isDirectory() || dir.mkdirs();
+
+        if (!made) {
+            /* Java 的 mkdir 对 0771 父目录偶尔判失败，交给 sh 再来一次 */
+            shell("mkdir -p " + CONFDIR + " 2>/dev/null");
+            made = dir.isDirectory();
+        }
+        if (!made) {
+            return CONFDIR + " 删不掉也建不了（/data/local/tmp 权限被改过？）";
+        }
+        dir.setReadable(true, false);
+        dir.setWritable(true, false);
+        dir.setExecutable(true, false);
+        shell("cp " + bak + "/*.conf " + CONFDIR + "/ 2>/dev/null");
+        shell("rm -rf " + bak + " 2>/dev/null");
+        return null;
     }
 
     /**
