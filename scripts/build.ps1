@@ -21,7 +21,10 @@ param(
     [switch]$NoKotlin
 )
 
-$ErrorActionPreference = 'Stop'
+# 5.1 的坑：native 程序（javac / kotlinc）把 warning 写到 stderr，PowerShell 会
+# 先把 stderr 变成 ErrorRecord，在 'Stop' 下直接终止整个脚本（aapt2/d8 全不跑）。
+# 关键步骤都有 $LASTEXITCODE 校验，所以这里降成 Continue，只靠退出码判成败。
+$ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 # app/libs 下的 jar：kotlinc / javac 编译期要用，d8 也要打进 dex
 $libJars = @(Get-ChildItem (Join-Path $root 'app/libs') -Filter '*.jar' -ErrorAction SilentlyContinue |
@@ -184,10 +187,18 @@ if ((Test-Path $ktSrc) -and $NoKotlin) {
         $refCp = (@($kotlinStdlib, $anno) + $libJars | Where-Object { $_ }) -join ';'
         New-Item -ItemType Directory -Force -Path $kclasses | Out-Null
         Write-Host "kotlinc: $([System.IO.Path]::GetFileName($kcJar))"
-        & $javaExe -cp $compilerCp org.jetbrains.kotlin.cli.jvm.K2JVMCompiler `
+        # kotlinc 的 warning 走 stderr；PowerShell 5.1 即使加了 2>&1，也会先把
+        # native stderr 变成 ErrorRecord，在 $ErrorActionPreference='Stop' 下直接
+        # 终止整个脚本（后面 aapt2/d8 全不跑，APK 不生成）。这里把 EAP 临时降到
+        # Continue，跑完立刻恢复；真失败仍由 $LASTEXITCODE 判定。
+        $__eap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        (& $javaExe -cp $compilerCp org.jetbrains.kotlin.cli.jvm.K2JVMCompiler `
             -no-stdlib -no-reflect -classpath $refCp -d ($kclasses -replace '\\', '/') `
-            ($ktSrc -replace '\\', '/')
-        if ($LASTEXITCODE -ne 0) { throw "kotlinc failed" }
+            ($ktSrc -replace '\\', '/') 2>&1) | ForEach-Object { Write-Host "  $_" }
+        $__kc = $LASTEXITCODE
+        $ErrorActionPreference = $__eap
+        if ($__kc -ne 0) { throw "kotlinc failed" }
     }
 }
 
