@@ -103,6 +103,8 @@ class BootImageParser {
         val taskAllocLink: Long?,
         /** null = 判不了（缺符号）；true = 已修补，链不可用。 */
         val patched: Boolean?,
+        /** taskAllocLink 是从哪个函数扫出来的（诊断用：copy_process / dup_task_struct …） */
+        val taskAllocFunc: String? = null,
     )
 
     data class StructOffsets(
@@ -258,9 +260,33 @@ class BootImageParser {
             return null
         }
 
+        /** 依次在多个候选函数里找，先命中的赢；返回值带上"在哪个函数里找到的"。 */
+        fun firstBlAny(funcs: List<String>, pred: (String) -> Boolean): Triple<String, Long, Long>? {
+            for (f in funcs) {
+                val hit = firstBl(f, pred) ?: continue
+                return Triple(f, hit.first, hit.second)
+            }
+            return null
+        }
+
         val timer = firstBl("do_timer_create") { it.contains("kmem_cache_alloc") }
         val cred = firstBl("prepare_creds") { it.contains("kmem_cache_alloc") }
-        val task = firstBl("copy_process") { it.contains("kmem_cache_alloc_node") }
+        /*
+         * task_struct 的分配点**不一定**在 copy_process 里。dup_task_struct 是否被
+         * 内联进 copy_process 完全取决于构建：
+         *   6.1.157-…-gc2dad16af736 / 6.6.118 → 内联，bl 落在 copy_process+0x15c
+         *   6.1.141-…-g43b5e9582321 / 6.1.145 K12s → 没内联，bl 在 dup_task_struct
+         * 只扫 copy_process 会在后一类上直接判"没扫到"，白白丢掉整个 conf。
+         */
+        val taskFns = listOf("copy_process", "dup_task_struct", "kernel_clone", "_do_fork")
+        val taskHit = firstBlAny(taskFns) { it.contains("kmem_cache_alloc_node") }
+            /*
+             * 少数构建把 alloc_task_struct_node 展开成不带 node 的形式。只有
+             * dup_task_struct 能这么退——它整个函数只分配 task_struct，不会误判。
+             */
+            ?: firstBl("dup_task_struct") { it.contains("kmem_cache_alloc") }
+                ?.let { Triple("dup_task_struct", it.first, it.second) }
+        val task = taskHit?.let { it.second to it.third }
 
         // 漏洞状态：有 posixtimer_exec 一定是补丁版；否则看清理与写锁的先后
         val patched: Boolean? = when {
@@ -278,6 +304,7 @@ class BootImageParser {
             credLink = cred?.first,
             taskAllocLink = task?.first,
             patched = patched,
+            taskAllocFunc = taskHit?.first,
         )
     }
 

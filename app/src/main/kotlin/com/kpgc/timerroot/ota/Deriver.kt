@@ -49,7 +49,8 @@ object Deriver {
         val timer = sites.timerLink
             ?: return "ERR: 没扫到 do_timer_create 里的 kmem_cache_alloc"
         val task = sites.taskAllocLink
-            ?: return "ERR: 没扫到 copy_process 里的 kmem_cache_alloc_node"
+            ?: return "ERR: 没扫到 task_struct 的分配点（找过 copy_process / dup_task_struct / " +
+                    "kernel_clone / _do_fork，都没有 bl kmem_cache_alloc_node）"
         val credSize = info.credLayout?.size ?: return "ERR: BTF 里没有 cred 的大小"
         val kitimer = so.kItimerSize ?: return "ERR: BTF 里没有 k_itimer 的大小"
 
@@ -102,7 +103,8 @@ object Deriver {
         sb.append('\n')
         sb.append("# task_struct / cred 布局（BTF）\n")
         sb.append("task_cred_off = ").append(hx(ts.cred)).append('\n')
-        sb.append("# copy_process 里 bl kmem_cache_alloc_node(task_struct) 的返回地址低 21 位\n")
+        sb.append("# task_struct 分配点（").append(sites.taskAllocFunc ?: "copy_process")
+            .append("）里 bl kmem_cache_alloc_node 的返回地址低 21 位\n")
         sb.append("copy_process_low21 = ").append(hx(task and 0x1FFFFFL)).append('\n')
         sb.append("task_alloc_bytes = ").append(hx(ts.size)).append('\n')
         sb.append('\n')
