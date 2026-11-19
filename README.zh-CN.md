@@ -74,6 +74,12 @@ Shizuku 会按这个号缓存用户服务进程，旧进程反序列化新 AIDL 
 
 验证方式：用两份真实 boot.img 生成 profile，与手工写的 conf 逐项对比 20 个字段，完全相同。
 
+`0.84` 起，task_struct 的分配点按 `copy_process` → `dup_task_struct` →
+`kernel_clone` → `_do_fork` 依次查找。编译器是否把 `dup_task_struct` 内联进
+`copy_process` 取决于构建（6.1.157 / 6.6.118 内联；6.1.141-…-g43b5e9582321 和
+6.1.145 没内联），只扫 `copy_process` 会在后者上直接判「没扫到
+`kmem_cache_alloc_node`」，整份 conf 拿不到。
+
 ### 4. KSU 管理器可手选
 
 自动嗅探仍然是默认，但嗅探不准时可以指定。覆盖文件

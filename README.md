@@ -56,6 +56,13 @@ process would deserialise the new AIDL incorrectly.
 Validated by generating profiles from two real boot images and diffing all 20
 fields against the hand-written confs — identical.
 
+Since `0.84` the task_struct allocation site is looked up in `copy_process` ->
+`dup_task_struct` -> `kernel_clone` -> `_do_fork`, in that order. Whether the
+compiler inlines `dup_task_struct` into `copy_process` varies per build
+(6.1.157 / 6.6.118 inline it; 6.1.141-...-g43b5e9582321 and 6.1.145 do not), and
+scanning only `copy_process` used to abort with *no `kmem_cache_alloc_node` in
+`copy_process`* on the latter.
+
 ### 4. Manager picker (`0.59`)
 
 Auto-detection was already content-based: any installed package that ships
